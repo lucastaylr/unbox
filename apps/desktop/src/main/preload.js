@@ -9,15 +9,19 @@ function subscribe(channel, callback) {
 }
 
 contextBridge.exposeInMainWorld('unbox', {
-  status: () => ipcRenderer.invoke('status:get'),
-  pickTarget: (kind) => ipcRenderer.invoke('target:pick', kind),
-  dropTarget: (file) => ipcRenderer.invoke('target:drop', webUtils.getPathForFile(file)),
-  scan: (targetPath) => ipcRenderer.invoke('scan:start', targetPath),
-  cancelScan: () => ipcRenderer.invoke('scan:cancel'),
-  onScanProgress: (callback) => subscribe('scan:progress', callback),
-  startAgent: (request) => ipcRenderer.invoke('agent:start', request),
-  stopAgent: () => ipcRenderer.invoke('agent:stop'),
-  onAgentEvent: (callback) => subscribe('agent:event', callback),
-  openWorkspace: (dir) => ipcRenderer.invoke('workspace:open', dir),
-  readReport: (dir) => ipcRenderer.invoke('workspace:report', dir),
+  setupStatus: () => ipcRenderer.invoke('setup:status'),
+  copy: (text) => ipcRenderer.invoke('clipboard:write', text),
+
+  listProjects: () => ipcRenderer.invoke('projects:list'),
+  createProject: (name) => ipcRenderer.invoke('projects:create', name),
+  getProject: (id) => ipcRenderer.invoke('projects:get', id),
+  renameProject: (id, name) => ipcRenderer.invoke('projects:rename', id, name),
+  addTargets: (id, kind) => ipcRenderer.invoke('projects:add', id, kind),
+  dropTargets: (id, files) => ipcRenderer.invoke('projects:drop', id, [...files].map((file) => webUtils.getPathForFile(file))),
+  removeTarget: (id, targetPath) => ipcRenderer.invoke('projects:remove', id, targetPath),
+  revealProject: (id) => ipcRenderer.invoke('projects:reveal', id),
+
+  startRun: (id, request) => ipcRenderer.invoke('run:start', id, request),
+  stopRun: () => ipcRenderer.invoke('run:stop'),
+  onRunEvent: (callback) => subscribe('run:event', callback),
 });

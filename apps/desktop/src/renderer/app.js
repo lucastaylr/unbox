@@ -5,19 +5,29 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   status: null,
-  target: null,
-  scan: null,
-  workspace: null,
-  agent: null,
-  task: 'explain',
-  running: false,
-  scanning: false,
+  projects: [],
+  project: null,
+  agent: readPreference('agent'),
+  running: null, // { projectId, turnId }
 };
 
-const ICONS = {
-  file: '<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 3v5h5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
-  folder: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
-};
+/* Small helpers */
+
+function readPreference(key) {
+  try {
+    return localStorage.getItem(`unbox.${key}`);
+  } catch {
+    return null;
+  }
+}
+
+function writePreference(key, value) {
+  try {
+    localStorage.setItem(`unbox.${key}`, value);
+  } catch {
+    // preferences are a convenience only
+  }
+}
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -26,18 +36,28 @@ function el(tag, className, text) {
   return node;
 }
 
-function statusRow({ level, title, detail }) {
-  const row = el('li', `status-row is-${level}`);
-  row.append(el('span', 'dot'));
-  const body = el('div');
-  body.append(el('strong', null, title));
-  if (detail) body.append(el('span', 'detail', detail));
-  row.append(body);
-  return row;
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const ICON_PATHS = {
+  file: ['M11.5 2.5H6a1.5 1.5 0 0 0-1.5 1.5v12A1.5 1.5 0 0 0 6 17.5h8a1.5 1.5 0 0 0 1.5-1.5V6.5l-4-4Z', 'M11.5 2.5v4h4'],
+  folder: ['M3 6.5A1.5 1.5 0 0 1 4.5 5H8l1.5 1.5h6A1.5 1.5 0 0 1 17 8v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 14.5v-8Z'],
+  close: ['M5 5l10 10M15 5 5 15'],
+  chevron: ['m8 5 5 5-5 5'],
+};
+
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 20 20');
+  svg.setAttribute('aria-hidden', 'true');
+  for (const d of ICON_PATHS[name]) {
+    const path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
+  }
+  return svg;
 }
 
 function formatBytes(size) {
-  if (size === null || size === undefined) return '';
+  if (size === null || size === undefined) return 'Folder';
   const units = ['B', 'KB', 'MB', 'GB'];
   let value = size;
   let unit = 0;
@@ -48,319 +68,516 @@ function formatBytes(size) {
   return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`;
 }
 
-/* Environment */
+function formatTime(iso) {
+  const date = new Date(iso);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return sameDay
+    ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function cleanError(error) {
+  return String(error?.message || error).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+}
+
+function plural(count, word) {
+  return `${count} ${word}${count === 1 ? '' : 's'}`;
+}
+
+/* Setup */
+
+const DEPENDENCIES = [
+  {
+    group: 'Required',
+    id: 'node',
+    name: 'Node.js',
+    desc: 'Runs REA on this Mac.',
+    check: (s) => (s.rea.node.supported ? ['ready', s.rea.node.version] : ['attention', s.rea.node.version ? 'Too old' : 'Not installed']),
+    howto: 'Install Node.js 24 or newer, then check again.',
+    commands: ['brew install node'],
+  },
+  {
+    group: 'Required',
+    id: 'rea',
+    name: 'REA',
+    desc: 'Reads files and reports what is inside them.',
+    check: (s) => (s.rea.ready ? ['ready', 'Ready'] : ['attention', 'Not available']),
+    howto: 'Unbox downloads REA automatically the first time, so it needs an internet connection. It also needs Node.js above.',
+    commands: [],
+  },
+  {
+    group: 'At least one agent',
+    id: 'claude',
+    name: 'Claude Code',
+    desc: 'Answers your questions using your Claude plan.',
+    check: (s) => agentCheck(s, 'claude'),
+    howto: 'Install Claude Code, then sign in with your Claude Pro or Max plan. Unbox never uses an API key.',
+    commands: ['npm install -g @anthropic-ai/claude-code', 'claude auth login'],
+  },
+  {
+    group: 'At least one agent',
+    id: 'codex',
+    name: 'Codex',
+    desc: 'Answers your questions using your ChatGPT plan.',
+    check: (s) => agentCheck(s, 'codex'),
+    howto: 'Install Codex, then choose Sign in with ChatGPT. If a run says your sign-in expired, run the logout command first.',
+    commands: ['npm install -g @openai/codex', 'codex login', 'codex logout'],
+  },
+  {
+    group: 'Optional',
+    id: 'engine',
+    name: 'Decompiler',
+    desc: 'Needed only to read native apps and binaries in depth.',
+    check: (s) => {
+      const found = s.rea.engines.filter((engine) => engine.available).map((engine) => engine.id);
+      return found.length ? ['ready', found.join(', ')] : ['muted', 'Not installed'];
+    },
+    howto: 'Install Ghidra and set GHIDRA_INSTALL_DIR, or let REA install Hopper. JavaScript, Electron and .NET apps work without one.',
+    commands: ['npx rea-agents@latest setup --install-hopper'],
+  },
+];
+
+function agentCheck(status, id) {
+  const agent = status.agents.find((item) => item.id === id);
+  if (agent.ready) return ['ready', 'Signed in'];
+  return ['attention', agent.installed ? 'Sign in needed' : 'Not installed'];
+}
+
+function setupReadiness(status) {
+  if (!status) return { ready: false, missing: [] };
+  const missing = [];
+  if (!status.rea.node.supported) missing.push('Node.js');
+  if (!status.rea.ready) missing.push('REA');
+  if (!status.agents.some((agent) => agent.ready)) missing.push('an agent');
+  return { ready: missing.length === 0, missing };
+}
 
 async function loadStatus() {
-  const button = $('refresh');
-  button.classList.add('spinning');
-  $('env-status').replaceChildren(statusRow({ level: 'pending', title: 'Checking REA…' }));
-  $('agent-status').replaceChildren();
+  $('setup-summary').textContent = "Checking what's installed on this Mac…";
+  $('setup-recheck').disabled = true;
+  renderSetup(null);
   try {
-    state.status = await api.status();
+    state.status = await api.setupStatus();
   } finally {
-    button.classList.remove('spinning');
+    $('setup-recheck').disabled = false;
   }
-  renderStatus();
+  renderSetup(state.status);
+  renderSetupLink();
   renderAgentPicker();
-  renderTaskPicker();
+  updateComposer();
 }
 
-function renderStatus() {
-  const { rea, agents } = state.status;
-  const env = $('env-status');
-  env.replaceChildren(
-    statusRow({
-      level: rea.node.supported ? 'ok' : 'bad',
-      title: 'Node.js',
-      detail: rea.node.version || 'Not found',
-    }),
-    statusRow({
-      level: rea.ready ? 'ok' : 'bad',
-      title: 'REA',
-      detail: rea.ready ? rea.source : rea.hint,
-    }),
-  );
-  if (rea.ready) {
-    const available = rea.engines.filter((engine) => engine.available).map((engine) => engine.id);
-    env.append(statusRow({
-      level: available.length ? 'ok' : 'warn',
-      title: 'Native engines',
-      detail: available.length ? available.join(', ') : 'None found. Native decompiling needs Ghidra, Hopper or IDA.',
-    }));
+function renderSetup(status) {
+  const groups = new Map();
+  for (const dep of DEPENDENCIES) {
+    if (!groups.has(dep.group)) groups.set(dep.group, []);
+    groups.get(dep.group).push(dep);
   }
-  $('agent-status').replaceChildren(
-    ...agents.map((agent) => statusRow({
-      level: agent.ready ? 'ok' : agent.installed ? 'warn' : 'bad',
-      title: agent.name,
-      detail: agent.ready ? `Signed in · ${agent.plan}` : agent.hint,
-    })),
-  );
+  let firstOpen = false;
+  const nodes = [];
+  for (const [title, deps] of groups) {
+    const group = el('div', 'group');
+    group.append(el('div', 'group-title', title));
+    for (const dep of deps) {
+      const [level, label] = status ? dep.check(status) : ['muted', 'Checking…'];
+      const open = status && level === 'attention' && !firstOpen;
+      if (open) firstOpen = true;
+      group.append(dependencyRow(dep, level, label, open));
+    }
+    nodes.push(group);
+  }
+  $('setup-groups').replaceChildren(...nodes);
+
+  if (!status) return;
+  const { ready, missing } = setupReadiness(status);
+  $('setup-summary').textContent = ready
+    ? 'Everything Unbox needs is ready.'
+    : `Unbox still needs ${missing.join(' and ')}. You can skip this and finish later.`;
+  $('setup-skip').hidden = ready;
 }
 
-/* Pickers */
+function dependencyRow(dep, level, label, open) {
+  const wrapper = el('div', `dep${open ? ' open' : ''}`);
+  const row = el('button', 'dep-row');
+  row.type = 'button';
+  row.setAttribute('aria-expanded', String(open));
+  const text = el('span');
+  text.append(el('span', 'dep-name', dep.name), el('span', 'dep-desc', dep.desc));
+  const chevron = icon('chevron');
+  chevron.classList.add('dep-chevron');
+  row.append(text, el('span', `dep-state ${level}`, label), chevron);
 
-function segmented(container, options, selected, onSelect) {
-  container.replaceChildren(
-    ...options.map((option) => {
-      const button = el('button');
-      button.type = 'button';
-      button.setAttribute('role', 'radio');
-      button.setAttribute('aria-checked', String(option.id === selected));
-      button.disabled = Boolean(option.disabled);
-      if (option.title) button.title = option.title;
-      if (option.dot) button.append(el('span', `dot ${option.dot}`));
-      button.append(option.label);
-      button.addEventListener('click', () => onSelect(option.id));
-      return button;
+  const howto = el('div', 'dep-howto');
+  howto.hidden = !open;
+  howto.append(el('p', null, dep.howto));
+  for (const command of dep.commands) howto.append(commandLine(command));
+
+  row.addEventListener('click', () => {
+    const isOpen = wrapper.classList.toggle('open');
+    howto.hidden = !isOpen;
+    row.setAttribute('aria-expanded', String(isOpen));
+  });
+  wrapper.append(row, howto);
+  return wrapper;
+}
+
+function commandLine(command) {
+  const line = el('div', 'command');
+  const button = el('button', 'copy', 'Copy');
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    await api.copy(command);
+    button.textContent = 'Copied';
+    setTimeout(() => (button.textContent = 'Copy'), 1400);
+  });
+  line.append(el('code', null, command), button);
+  return line;
+}
+
+function renderSetupLink() {
+  const { ready, missing } = setupReadiness(state.status);
+  $('setup-dot').className = `dot ${state.status ? (ready ? 'ready' : 'attention') : ''}`;
+  $('setup-link-text').textContent = !state.status ? 'Setup' : ready ? 'Setup' : `Setup needs ${missing.join(' and ')}`;
+}
+
+function showSetup() {
+  $('setup').hidden = false;
+  $('shell').hidden = true;
+}
+
+function leaveSetup() {
+  $('setup').hidden = true;
+  $('shell').hidden = false;
+  $('new-project').focus();
+}
+
+/* Projects */
+
+async function loadProjects() {
+  state.projects = await api.listProjects();
+  renderProjectList();
+}
+
+function renderProjectList() {
+  $('project-list').replaceChildren(
+    ...state.projects.map((project) => {
+      const item = el('button', 'project-item');
+      item.type = 'button';
+      item.setAttribute('aria-current', String(project.id === state.project?.id));
+      item.append(
+        el('strong', null, project.name),
+        el('span', null, project.targetCount ? plural(project.targetCount, 'item') : 'Empty'),
+      );
+      item.addEventListener('click', () => openProject(project.id));
+      return item;
     }),
   );
 }
+
+async function openProject(id) {
+  state.project = await api.getProject(id);
+  $('empty').hidden = true;
+  $('project').hidden = false;
+  $('project-title').value = state.project.name;
+  renderProjectList();
+  renderTargets();
+  renderThread();
+  updateComposer();
+  $('prompt').focus();
+}
+
+function showEmpty() {
+  state.project = null;
+  $('project').hidden = true;
+  $('empty').hidden = false;
+  renderProjectList();
+}
+
+function openNewProjectDialog() {
+  $('new-project-name').value = '';
+  $('new-project-dialog').showModal();
+  $('new-project-name').focus();
+}
+
+async function createProject(event) {
+  event.preventDefault();
+  const name = $('new-project-name').value.trim();
+  if (!name) return;
+  $('new-project-dialog').close();
+  const project = await api.createProject(name);
+  await loadProjects();
+  await openProject(project.id);
+}
+
+async function renameProject() {
+  const name = $('project-title').value.trim();
+  if (!state.project || !name || name === state.project.name) {
+    $('project-title').value = state.project?.name || '';
+    return;
+  }
+  state.project = await api.renameProject(state.project.id, name);
+  await loadProjects();
+}
+
+/* Targets */
+
+function renderTargets() {
+  const targets = state.project?.targets || [];
+  $('targets').replaceChildren(
+    ...targets.map((target) => {
+      const chip = el('li', 'target');
+      chip.title = target.path;
+      const remove = el('button', 'target-remove');
+      remove.type = 'button';
+      remove.setAttribute('aria-label', `Remove ${target.name}`);
+      remove.append(icon('close'));
+      remove.disabled = Boolean(state.running);
+      remove.addEventListener('click', async () => {
+        state.project = await api.removeTarget(state.project.id, target.path);
+        renderTargets();
+        updateComposer();
+        loadProjects();
+      });
+      chip.append(
+        icon(target.isDirectory ? 'folder' : 'file'),
+        el('span', 'target-name', target.name),
+        el('span', 'target-meta', formatBytes(target.size)),
+        remove,
+      );
+      return chip;
+    }),
+  );
+  $('prompt').placeholder = targets.length ? 'Ask anything about these files' : 'Add files or a folder with +, then ask about them';
+}
+
+async function addTargets(kind) {
+  closeMenus();
+  state.project = await api.addTargets(state.project.id, kind);
+  renderTargets();
+  updateComposer();
+  loadProjects();
+  $('prompt').focus();
+}
+
+/* Agent picker */
 
 function renderAgentPicker() {
   const agents = state.status?.agents || [];
-  if (!state.agent || !agents.find((agent) => agent.id === state.agent)?.ready) {
-    state.agent = agents.find((agent) => agent.ready)?.id || agents[0]?.id || null;
+  const current = agents.find((agent) => agent.id === state.agent);
+  if (!current || (!current.ready && agents.some((agent) => agent.ready))) {
+    state.agent = agents.find((agent) => agent.ready)?.id || agents[0]?.id || state.agent;
   }
-  segmented(
-    $('agent-picker'),
-    agents.map((agent) => ({ id: agent.id, label: agent.name, title: agent.ready ? '' : agent.hint })),
-    state.agent,
-    (id) => {
-      state.agent = id;
-      renderAgentPicker();
-    },
+  const selected = agents.find((agent) => agent.id === state.agent);
+  $('agent-label').textContent = selected ? selected.name : 'Agent';
+  $('agent-menu').replaceChildren(
+    ...agents.map((agent) => {
+      const option = el('button');
+      option.type = 'button';
+      option.setAttribute('role', 'menuitemradio');
+      option.setAttribute('aria-checked', String(agent.id === state.agent));
+      option.append(el('strong', null, agent.name), el('span', null, agent.ready ? `Uses your ${agent.plan} plan` : 'Not signed in. Open setup to fix.'));
+      option.addEventListener('click', () => {
+        state.agent = agent.id;
+        writePreference('agent', agent.id);
+        closeMenus();
+        renderAgentPicker();
+        updateComposer();
+      });
+      return option;
+    }),
   );
-  updateRunState();
 }
 
-function renderTaskPicker() {
-  segmented($('task-picker'), state.status?.tasks || [], state.task, (id) => {
-    state.task = id;
-    renderTaskPicker();
-  });
-  $('question-row').classList.toggle('hidden', state.task !== 'ask');
-  updateRunState();
+/* Menus */
+
+function toggleMenu(button, menu) {
+  const open = menu.hidden;
+  closeMenus();
+  menu.hidden = !open;
+  button.setAttribute('aria-expanded', String(open));
+  if (open) menu.querySelector('button:not(:disabled)')?.focus();
 }
 
-function selectedAgent() {
-  return state.status?.agents.find((agent) => agent.id === state.agent);
-}
-
-function updateRunState() {
-  const agent = selectedAgent();
-  const hint = $('agent-hint');
-  let reason = '';
-  if (!state.target) reason = 'Choose a target first.';
-  else if (state.scanning) reason = 'Waiting for the scan to finish…';
-  else if (!agent) reason = 'Checking agents…';
-  else if (!agent.ready) reason = agent.hint;
-  else if (state.task === 'ask' && !$('question').value.trim()) reason = 'Type a question to ask.';
-  hint.textContent = reason || `Runs on your ${agent.name} sign-in (${agent.plan}). No API key is used.`;
-  $('run-agent').disabled = Boolean(reason) || state.running;
-  $('run-agent').classList.toggle('hidden', state.running);
-  $('stop-agent').classList.toggle('hidden', !state.running);
-}
-
-/* Target and scan */
-
-async function chooseTarget(kind) {
-  try {
-    const target = await api.pickTarget(kind);
-    if (target) openTarget(target);
-  } catch (error) {
-    alert(error.message);
+function closeMenus() {
+  for (const [button, menu] of [['add-button', 'add-menu'], ['agent-button', 'agent-menu']]) {
+    $(menu).hidden = true;
+    $(button).setAttribute('aria-expanded', 'false');
   }
 }
 
-function openTarget(target) {
-  state.target = target;
-  state.scan = null;
-  state.workspace = null;
-  $('dropzone').classList.add('hidden');
-  $('workspace').classList.remove('hidden');
-  $('target-name').textContent = target.name;
-  $('target-path').textContent = [target.path, formatBytes(target.size)].filter(Boolean).join('  ·  ');
-  $('target-icon').innerHTML = target.isDirectory ? ICONS.folder : ICONS.file;
-  resetAgentOutput();
-  $('report-card').classList.add('hidden');
-  updateRunState();
-  runScan();
+/* Composer */
+
+function blockingReason() {
+  if (!state.project) return null;
+  const agent = state.status?.agents.find((item) => item.id === state.agent);
+  if (!state.project.targets.length) return { text: 'Add a file or folder to get started.' };
+  if (!state.status) return { text: 'Checking your agents…' };
+  if (!agent?.ready) return { text: `${agent?.name || 'The agent'} isn't signed in yet.`, action: 'Open setup' };
+  return null;
 }
 
-function closeTarget() {
-  api.cancelScan();
-  state.target = null;
-  state.scanning = false;
-  $('workspace').classList.add('hidden');
-  $('dropzone').classList.remove('hidden');
-}
+function updateComposer() {
+  if (!state.project) return;
+  const runningHere = state.running?.projectId === state.project.id;
+  const reason = blockingReason();
+  const prompt = $('prompt').value.trim();
+  $('composer').classList.toggle('running', Boolean(runningHere));
+  $('send').setAttribute('aria-label', runningHere ? 'Stop' : 'Send');
+  $('send').disabled = runningHere ? false : Boolean(state.running || reason || !prompt);
 
-async function runScan() {
-  const target = state.target;
-  const badge = $('scan-badge');
-  badge.className = 'badge run';
-  badge.textContent = 'Scanning';
-  $('scan-progress').classList.remove('hidden');
-  $('scan-message').textContent = 'Starting REA…';
-  $('scan-result').replaceChildren();
-  state.scanning = true;
-  updateRunState();
-  const result = await api.scan(target.path);
-  if (state.target !== target || result.cancelled) return;
-  state.scanning = false;
-  updateRunState();
-  state.scan = result;
-  state.workspace = result.workspace;
-  $('scan-progress').classList.add('hidden');
-  renderScan(result);
-}
-
-function renderScan(result) {
-  const badge = $('scan-badge');
-  const container = $('scan-result');
-  if (result.error) {
-    badge.className = 'badge bad';
-    badge.textContent = 'Needs attention';
-    const callout = el('div', 'callout');
-    callout.append(el('strong', null, result.error.code ? `REA: ${result.error.code}` : 'Scan failed'));
-    callout.append(el('div', null, result.error.message));
-    if (result.error.action) callout.append(el('div', 'action', result.error.action));
-    container.replaceChildren(callout);
-    return;
-  }
-  badge.className = 'badge ok';
-  badge.textContent = 'Complete';
-
-  const facts = el('div', 'facts');
-  for (const fact of result.facts) {
-    const card = el('div', 'fact');
-    const isText = typeof fact.value === 'string';
-    card.append(el('div', `value${isText ? ' text' : ''}`, fact.value));
-    card.append(el('div', 'label', fact.label));
-    card.title = `${fact.label}: ${fact.value}`;
-    facts.append(card);
-  }
-
-  const meta = el('div', 'meta');
-  meta.append(metaItem('Type', result.kind));
-  if (result.format) meta.append(metaItem('Format', result.format));
-  if (result.sha256) meta.append(metaItem('SHA-256', `${result.sha256.slice(0, 16)}…`, result.sha256));
-  const nodes = [meta, facts];
-
-  if (result.nextSteps.length) {
-    nodes.push(el('div', 'section-title', 'REA suggests next'));
-    const list = el('ul', 'list');
-    for (const step of result.nextSteps) {
-      const li = el('li');
-      li.append(el('span', 'op', step.operation), el('span', null, step.rationale));
-      list.append(li);
+  const hint = $('composer-hint');
+  hint.replaceChildren();
+  if (reason && !runningHere) {
+    hint.append(reason.text, ' ');
+    if (reason.action) {
+      const link = el('button', null, reason.action);
+      link.type = 'button';
+      link.addEventListener('click', showSetup);
+      hint.append(link);
     }
-    nodes.push(list);
+  } else if (state.running && !runningHere) {
+    hint.append('Another project is running. It needs to finish first.');
   }
-  if (result.limitations.length) {
-    const details = el('details');
-    details.append(el('summary', null, `What this scan can't tell you (${result.limitations.length})`));
-    const list = el('ul');
-    for (const limitation of result.limitations) list.append(el('li', null, limitation));
-    details.append(list);
-    nodes.push(details);
+  hint.hidden = !hint.childNodes.length;
+  $('suggestions').hidden = Boolean(state.project.turns.length) || !state.project.targets.length;
+}
+
+function autosize() {
+  const prompt = $('prompt');
+  prompt.style.height = 'auto';
+  prompt.style.height = `${Math.min(prompt.scrollHeight, 220)}px`;
+}
+
+async function submit(event) {
+  event.preventDefault();
+  if (state.running?.projectId === state.project?.id) {
+    api.stopRun();
+    return;
   }
-  container.replaceChildren(...nodes);
-}
-
-function metaItem(label, value, title) {
-  const span = el('span');
-  span.append(`${label} `, el('span', 'mono', value));
-  if (title) span.title = title;
-  return span;
-}
-
-/* Agent */
-
-function resetAgentOutput() {
-  $('transcript').replaceChildren();
-  $('transcript').classList.add('hidden');
-  $('done-row').classList.add('hidden');
-}
-
-async function runAgentTask() {
-  resetAgentOutput();
-  $('report-card').classList.add('hidden');
-  $('transcript').classList.remove('hidden');
-  appendEvent({ kind: 'status', text: 'Starting agent…' });
-  state.running = true;
-  updateRunState();
+  if ($('send').disabled) return;
+  const prompt = $('prompt').value.trim();
   try {
-    const { workspace } = await api.startAgent({
-      agent: state.agent,
-      task: state.task,
-      question: $('question').value,
-      targetPath: state.target.path,
-      scan: state.scan && !state.scan.error ? state.scan : null,
-    });
-    state.workspace = workspace;
+    const turn = await api.startRun(state.project.id, { prompt, agent: state.agent });
+    state.running = { projectId: state.project.id, turnId: turn.id };
+    state.project.turns.push(turn);
+    $('prompt').value = '';
+    autosize();
+    renderTargets();
+    renderThread();
+    updateComposer();
   } catch (error) {
-    state.running = false;
-    appendEvent({ kind: 'done', ok: false, text: error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') });
-    updateRunState();
+    $('composer-hint').hidden = false;
+    $('composer-hint').textContent = cleanError(error);
   }
 }
 
-function appendEvent(event) {
-  const transcript = $('transcript');
-  const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 60;
-  // Keep one live status line instead of stacking retries and progress notes.
-  const last = transcript.lastElementChild;
-  if (event.kind === 'status' && last?.classList.contains('status')) {
-    last.textContent = event.text;
-    return;
-  }
-  let node;
-  if (event.kind === 'tool') {
-    node = el('div', 'event tool');
-    node.append(el('span', 'name', event.name), el('span', 'detail', event.detail || ''));
-    node.title = event.detail || '';
-  } else if (event.kind === 'text') {
-    node = el('div', 'event text markdown');
-    window.renderMarkdown(node, event.text);
-  } else if (event.kind === 'done') {
-    const label = event.ok ? 'Finished' : 'Stopped';
-    const extra = [event.turns ? `${event.turns} turns` : '', event.durationMs ? `${Math.round(event.durationMs / 1000)}s` : '']
-      .filter(Boolean).join(' · ');
-    node = el('div', `event done ${event.ok ? 'ok' : 'bad'}`, [label, extra, event.text].filter(Boolean).join(' — '));
-  } else {
-    node = el('div', `event ${event.kind}`, event.text);
-  }
-  transcript.append(node);
-  if (nearBottom) transcript.scrollTop = transcript.scrollHeight;
+/* Thread */
+
+const liveViews = new Map();
+
+function renderThread() {
+  liveViews.clear();
+  const turns = [...(state.project?.turns || [])].reverse();
+  $('thread').replaceChildren(...turns.map(turnView));
 }
 
-api.onAgentEvent((event) => {
-  if (!state.running) return;
-  appendEvent(event);
+function turnView(turn) {
+  const article = el('article', 'turn');
+  article.append(el('div', 'turn-prompt', turn.prompt));
+
+  const agentName = state.status?.agents.find((agent) => agent.id === turn.agent)?.name
+    || (turn.agent === 'claude' ? 'Claude Code' : 'Codex');
+  const stateLabel = turn.status === 'running' ? 'Working' : turn.status === 'done' ? 'Done' : 'Stopped';
+  const meta = el('div', 'turn-meta');
+  const status = el('span', `state${turn.status === 'running' ? ' live' : turn.status === 'stopped' ? ' failed' : ''}`, stateLabel);
+  meta.append(el('span', null, agentName), el('span', null, formatTime(turn.createdAt)), status);
+  article.append(meta);
+
+  const live = el('div', 'live-line');
+  live.append(el('span', 'pulse'), el('span', null, 'Starting'));
+  live.hidden = turn.status !== 'running';
+
+  const activity = el('details', 'activity');
+  const summary = el('summary');
+  const list = el('ul', 'activity-list');
+  activity.append(summary, list);
+  for (const scanned of turn.scans || []) list.append(scanItem(scanned));
+  for (const step of turn.steps || []) list.append(stepItem(step));
+
+  const answer = el('div', 'answer markdown');
+  const error = el('div', 'turn-error');
+  article.append(live, activity, answer, error);
+
+  const view = { turn, status, live, activity, summary, list, answer, error };
+  refreshTurn(view);
+  if (turn.status === 'running') liveViews.set(turn.id, view);
+  return article;
+}
+
+function scanItem(scanned) {
+  const item = el('li', 'scan');
+  const detail = scanned.ok ? scanned.headline || scanned.kind : scanned.error?.message || 'REA could not read this file.';
+  item.append(el('span', 'step-name', `Scanned ${scanned.name}`), el('span', 'step-detail', detail));
+  item.title = detail;
+  return item;
+}
+
+function stepItem(step) {
+  const item = el('li');
+  item.append(el('span', 'step-name', step.name), el('span', 'step-detail', step.detail || ''));
+  item.title = step.detail || '';
+  return item;
+}
+
+function refreshTurn(view) {
+  const { turn } = view;
+  const scans = turn.scans?.length || 0;
+  const steps = turn.steps?.length || 0;
+  const parts = [];
+  if (scans) parts.push(`scanned ${plural(scans, 'item')}`);
+  if (steps) parts.push(`took ${plural(steps, 'step')}`);
+  view.activity.hidden = !parts.length;
+  view.summary.replaceChildren(icon('chevron'), `${parts.join(' and ').replace(/^./, (c) => c.toUpperCase())}`);
+
+  if (turn.answer) window.renderMarkdown(view.answer, turn.answer);
+  view.answer.hidden = !turn.answer;
+  view.error.textContent = turn.error || '';
+  view.error.hidden = !turn.error;
+}
+
+api.onRunEvent(({ projectId, turnId, event }) => {
+  const view = liveViews.get(turnId);
   if (event.kind === 'done') {
-    state.running = false;
-    updateRunState();
-    if (state.workspace) $('done-row').classList.remove('hidden');
-    $('view-report').classList.toggle('hidden', !event.ok);
-    if (event.ok) showReport();
-  }
-});
-
-async function showReport() {
-  const report = await api.readReport(state.workspace);
-  const card = $('report-card');
-  if (!report) {
-    card.classList.add('hidden');
+    if (state.running?.turnId === turnId) state.running = null;
+    if (state.project?.id === projectId) {
+      const index = state.project.turns.findIndex((turn) => turn.id === turnId);
+      if (index >= 0) state.project.turns[index] = event.turn;
+      renderThread();
+      renderTargets();
+      updateComposer();
+    }
+    loadProjects();
     return;
   }
-  window.renderMarkdown($('report'), report);
-  card.classList.remove('hidden');
-  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-
-api.onScanProgress((message) => {
-  $('scan-message').textContent = message;
+  if (!view) return;
+  const liveText = view.live.lastElementChild;
+  if (event.kind === 'scan') {
+    if (event.state === 'running') liveText.textContent = `Scanning ${event.name}: ${event.text}`;
+    if (event.state === 'done') {
+      view.turn.scans.push(event.summary);
+      view.list.append(scanItem(event.summary));
+    }
+  } else if (event.kind === 'tool') {
+    view.turn.steps.push({ name: event.name, detail: event.detail });
+    view.list.append(stepItem(event));
+    liveText.textContent = [event.name, event.detail].filter(Boolean).join('  ');
+  } else if (event.kind === 'text') {
+    view.turn.answer = [view.turn.answer, event.text].filter(Boolean).join('\n\n');
+    liveText.textContent = 'Writing';
+  } else if (event.kind === 'status' || event.kind === 'error' || event.kind === 'tool_result') {
+    liveText.textContent = event.text;
+  }
+  refreshTurn(view);
 });
 
 /* Drag and drop */
@@ -368,39 +585,81 @@ api.onScanProgress((message) => {
 let dragDepth = 0;
 window.addEventListener('dragenter', (event) => {
   event.preventDefault();
+  if (!state.project || state.running) return;
   dragDepth += 1;
-  $('drop-overlay').classList.remove('hidden');
+  $('drop-project').textContent = state.project.name;
+  $('drop-overlay').hidden = false;
 });
 window.addEventListener('dragleave', () => {
   dragDepth = Math.max(0, dragDepth - 1);
-  if (!dragDepth) $('drop-overlay').classList.add('hidden');
+  if (!dragDepth) $('drop-overlay').hidden = true;
 });
 window.addEventListener('dragover', (event) => event.preventDefault());
 window.addEventListener('drop', async (event) => {
   event.preventDefault();
   dragDepth = 0;
-  $('drop-overlay').classList.add('hidden');
-  const file = event.dataTransfer?.files?.[0];
-  if (!file || state.running) return;
-  try {
-    openTarget(await api.dropTarget(file));
-  } catch (error) {
-    alert(error.message);
-  }
+  $('drop-overlay').hidden = true;
+  const files = event.dataTransfer?.files;
+  if (!state.project || state.running || !files?.length) return;
+  state.project = await api.dropTargets(state.project.id, files);
+  renderTargets();
+  updateComposer();
+  loadProjects();
 });
 
 /* Wiring */
 
-$('pick-file').addEventListener('click', () => chooseTarget('file'));
-$('pick-folder').addEventListener('click', () => chooseTarget('folder'));
-$('change-target').addEventListener('click', () => {
-  if (!state.running) closeTarget();
+$('setup-continue').addEventListener('click', leaveSetup);
+$('setup-skip').addEventListener('click', leaveSetup);
+$('setup-recheck').addEventListener('click', loadStatus);
+$('open-setup').addEventListener('click', () => {
+  showSetup();
+  loadStatus();
 });
-$('refresh').addEventListener('click', loadStatus);
-$('run-agent').addEventListener('click', runAgentTask);
-$('stop-agent').addEventListener('click', () => api.stopAgent());
-$('question').addEventListener('input', updateRunState);
-$('open-workspace').addEventListener('click', () => api.openWorkspace(state.workspace));
-$('view-report').addEventListener('click', showReport);
+$('new-project').addEventListener('click', openNewProjectDialog);
+$('start-unboxing').addEventListener('click', openNewProjectDialog);
+$('new-project-form').addEventListener('submit', createProject);
+$('new-project-cancel').addEventListener('click', () => $('new-project-dialog').close());
+$('project-title').addEventListener('blur', renameProject);
+$('project-title').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') event.target.blur();
+  if (event.key === 'Escape') {
+    event.target.value = state.project.name;
+    event.target.blur();
+  }
+});
+$('reveal-project').addEventListener('click', () => api.revealProject(state.project.id));
+$('add-button').addEventListener('click', () => toggleMenu($('add-button'), $('add-menu')));
+$('agent-button').addEventListener('click', () => toggleMenu($('agent-button'), $('agent-menu')));
+for (const option of document.querySelectorAll('[data-add]')) {
+  option.addEventListener('click', () => addTargets(option.dataset.add));
+}
+for (const suggestion of document.querySelectorAll('[data-prompt]')) {
+  suggestion.addEventListener('click', () => {
+    $('prompt').value = suggestion.dataset.prompt;
+    autosize();
+    updateComposer();
+    $('prompt').focus();
+  });
+}
+$('composer').addEventListener('submit', submit);
+$('prompt').addEventListener('input', () => {
+  autosize();
+  updateComposer();
+});
+$('prompt').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    $('composer').requestSubmit();
+  }
+});
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('.menu-anchor')) closeMenus();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeMenus();
+});
 
+if (/Mac/.test(navigator.platform)) document.body.classList.add('vibrant');
 loadStatus();
+loadProjects().then(showEmpty);

@@ -9,7 +9,7 @@
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check src/main/main.js && node --check src/main/rea.js && node --check src/main/agents.js && node --check src/main/prompts.js && node --check src/main/env.js && node --check src/main/preload.js && node --check src/renderer/app.js && node --check src/renderer/markdown.js"
+    "check": "node --check src/main/main.js && node --check src/main/rea.js && node --check src/main/agents.js && node --check src/main/prompts.js && node --check src/main/env.js && node --check src/main/preload.js && node --check src/main/projects.js && node --check src/renderer/app.js && node --check src/renderer/markdown.js"
   },
   "engines": {
     "node": "^22.23.4 || ^24.22.1 || >=26.12.1"

@@ -13,17 +13,20 @@ so runs count against your plan, not an API account.
 
 ## How it works
 
-1. **Open.** Choose or drop a file, app bundle or folder.
-2. **Scan.** Unbox runs REA's static inspection. Nothing is executed.
+1. **Set up.** At launch, Unbox checks for Node.js, REA, an agent and an
+   optional decompiler, with copyable install commands. You can skip it and
+   reopen it from the sidebar.
+2. **Start a project.** Name it, then add files or folders with **+** or by
+   dropping them on the window.
+3. **Ask.** Type a request in the composer and pick Claude Code or Codex.
+   Before the agent starts, REA scans anything new without running it.
    Folders and `.asar` archives use `analyze-javascript-application`;
-   everything else uses `inspect-artifact`.
-3. **Ask an agent.** Pick Claude Code or Codex and a task:
-   *Explain how it works*, *Reconstruct as source* or *Ask a question*. The agent
-   uses REA's MCP tools and writes `REPORT.md` (and `reconstruction/` for
-   source output) into a workspace folder.
+   everything else uses `inspect-artifact`. The agent then digs deeper with
+   REA's MCP tools and answers in the thread.
 
-Each target gets a workspace folder in the app's data directory, holding
-`scan.json` (full REA Evidence), `PROMPT.md` and the agent's output.
+Each project is a folder in the app's data directory (**Open folder** shows it)
+holding `project.json`, each scan's full REA Evidence, the last prompt sent
+and anything the agent writes, such as `REPORT.md` or `reconstruction/`.
 
 ## Install
 
@@ -111,7 +114,8 @@ so review Anthropic's and OpenAI's terms before distributing Unbox to others.
 ```
 apps/desktop/
   src/main/      Electron main process
-    main.js      window, IPC and workspace handling
+    main.js      window, IPC and run orchestration
+    projects.js  project storage
     rea.js       runs REA and summarizes its Evidence
     agents.js    drives Claude Code and Codex headlessly
     prompts.js   task prompts and safety rules

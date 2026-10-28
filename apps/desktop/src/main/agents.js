@@ -63,9 +63,10 @@ function mcpServer() {
   return { command: rea.command, args: [...rea.args, 'mcp'] };
 }
 
-function claudeArgs(targetPath) {
+function claudeArgs(targetPaths) {
   const config = { mcpServers: { rea: mcpServer() } };
-  const targetDir = fs.statSync(targetPath).isDirectory() ? targetPath : path.dirname(targetPath);
+  const targetDirs = [...new Set(targetPaths.map((targetPath) =>
+    fs.statSync(targetPath).isDirectory() ? targetPath : path.dirname(targetPath)))];
   return [
     '-p',
     '--output-format', 'stream-json',
@@ -74,7 +75,7 @@ function claudeArgs(targetPath) {
     '--strict-mcp-config',
     '--mcp-config', JSON.stringify(config),
     '--permission-mode', 'acceptEdits',
-    '--add-dir', targetDir,
+    ...targetDirs.flatMap((dir) => ['--add-dir', dir]),
     // No shell or web access: the agent reads through REA and writes only
     // into its workspace.
     '--disallowedTools', 'Bash', 'WebFetch', 'WebSearch',
@@ -102,8 +103,8 @@ function codexArgs(workspace) {
 
 // Starts an agent run and reports normalized events:
 //   { kind: 'status' | 'text' | 'tool' | 'tool_result' | 'error' | 'done', ... }
-function runAgent({ id, prompt, workspace, targetPath, onEvent }) {
-  const args = id === 'claude' ? claudeArgs(targetPath) : codexArgs(workspace);
+function runAgent({ id, prompt, workspace, targetPaths, onEvent }) {
+  const args = id === 'claude' ? claudeArgs(targetPaths) : codexArgs(workspace);
   const env = childEnv(id === 'claude' ? { MCP_TOOL_TIMEOUT: '600000', MCP_TIMEOUT: '120000' } : {});
   const child = spawn(AGENTS[id].command, args, {
     cwd: workspace,

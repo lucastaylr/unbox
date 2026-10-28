@@ -125,14 +125,16 @@ function runRea(args, { cwd, onProgress, signal }) {
   });
 }
 
-async function scan(targetPath, { workspace, onProgress, signal }) {
+// Scans one target and saves REA's complete Evidence as evidenceFile inside
+// the workspace, so the agent can read it later.
+async function scan(targetPath, { workspace, evidenceFile = 'scan.json', onProgress, signal }) {
   const route = routeFor(targetPath);
-  onProgress?.(route === 'inspect-artifact' ? 'Inspecting artifact' : 'Reading application sources');
+  onProgress?.(route === 'inspect-artifact' ? 'Inspecting file' : 'Reading application sources');
   const result = await runRea([route, targetPath, '--json'], { cwd: workspace, onProgress, signal });
   if (result.cancelled) return { cancelled: true };
-  if (result.raw) fs.writeFileSync(path.join(workspace, 'scan.json'), result.raw);
+  if (result.raw) fs.writeFileSync(path.join(workspace, evidenceFile), result.raw);
   if (!result.json) return { route, error: result.error };
-  return { route, ...summarize(route, result.json) };
+  return { route, file: evidenceFile, ...summarize(route, result.json) };
 }
 
 function summarize(route, json) {
@@ -150,11 +152,34 @@ function summarize(route, json) {
   return summarizeArtifact(json, result);
 }
 
+function count(value, word) {
+  return `${value} ${word}${value === 1 ? '' : 's'}`;
+}
+
+function joinWithAnd(parts) {
+  return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}` : parts[0] || '';
+}
+
+const FORMAT_NAMES = {
+  'mach-o': 'Mach-O binary',
+  elf: 'Linux ELF binary',
+  pe: 'Windows executable',
+  apk: 'Android app',
+  zip: 'ZIP archive',
+  wasm: 'WebAssembly module',
+};
+
 function summarizeApplication(json, result) {
   const summary = result.summary || {};
   const stats = result.statistics || {};
   const graph = result.graph || {};
+  const parts = [count(stats.relevant_files ?? 0, 'file')];
+  if (summary.browser_windows) parts.push(count(summary.browser_windows, 'window'));
+  if (summary.preload_entrypoints) parts.push(count(summary.preload_entrypoints, 'preload script'));
+  if (summary.context_bridge_apis) parts.push(count(summary.context_bridge_apis, 'exposed API'));
+  if (summary.native_addon_bindings) parts.push(count(summary.native_addon_bindings, 'native add-on'));
   return {
+    headline: `JavaScript app with ${joinWithAnd(parts)}`,
     kind: 'JavaScript application',
     format: result.format || json.subject?.format,
     sha256: result.root_artifact_sha256 || json.subject?.digest?.sha256,
@@ -178,7 +203,11 @@ function summarizeArtifact(json, result) {
   const subject = result.subject || {};
   const observations = result.observations || [];
   const kinds = [...new Set(observations.map((observation) => observation.kind))];
+  const format = subject.root_format || json.subject?.format;
+  const needsEngine = (result.next_probes || []).some((probe) => probe.operation === 'open_binary');
+  const name = FORMAT_NAMES[format] || (format ? `${format} file` : 'File');
   return {
+    headline: needsEngine ? `${name}. Reading its code needs a decompiler.` : name,
     kind: 'Artifact',
     format: subject.root_format || json.subject?.format,
     sha256: subject.root_sha256 || json.subject?.digest?.sha256,
