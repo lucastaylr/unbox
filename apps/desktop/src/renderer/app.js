@@ -460,6 +460,7 @@ function renderProjectList() {
 
 async function openProject(id) {
   state.project = await api.getProject(id);
+  state.notice = null;
   $('empty').hidden = true;
   $('project').hidden = false;
   $('project-title').value = state.project.name;
@@ -701,7 +702,17 @@ function updateComposer() {
     }
   } else if (state.running && !runningHere) {
     hint.append('Another project is running. It needs to finish first.');
+  } else if (state.notice && !runningHere) {
+    // The last request failed before doing anything; say so once, here.
+    hint.append(state.notice, ' ');
+    if (/sign.?in|log ?in|setup|install/i.test(state.notice)) {
+      const link = el('button', null, 'Open setup');
+      link.type = 'button';
+      link.addEventListener('click', showSetup);
+      hint.append(link);
+    }
   }
+  hint.classList.toggle('error', Boolean(state.notice && !reason && !state.running));
   hint.hidden = !hint.childNodes.length;
   $('suggestions').hidden = Boolean(state.project.turns.length) || !state.project.targets.length;
 }
@@ -720,6 +731,7 @@ async function submit(event) {
   }
   if ($('send').disabled) return;
   const prompt = $('prompt').value.trim();
+  state.notice = null;
   try {
     const turn = await api.startRun(state.project.id, { prompt, agent: state.agent, model: state.models[state.agent] || '' });
     state.running = { projectId: state.project.id, turnId: turn.id };
@@ -730,14 +742,23 @@ async function submit(event) {
     renderThread();
     updateComposer();
   } catch (error) {
-    $('composer-hint').hidden = false;
-    $('composer-hint').textContent = cleanError(error);
+    state.notice = cleanError(error);
+    updateComposer();
   }
 }
 
 /* Thread */
 
 const liveViews = new Map();
+const FILE_TOOLS = new Set(['write', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit']);
+const SOURCE_LABELS = { rea: 'REA', shell: 'Shell', files: 'Files', other: 'Tool' };
+
+// Runs saved before steps were tagged are classified by tool name.
+function stepSource(step) {
+  if (step.source) return step.source;
+  if (step.name === 'shell') return 'shell';
+  return FILE_TOOLS.has(step.name) ? 'files' : 'rea';
+}
 
 function renderThread() {
   liveViews.clear();
@@ -745,77 +766,194 @@ function renderThread() {
   $('thread').replaceChildren(...turns.map(turnView));
 }
 
-function turnView(turn) {
+function turnView(saved) {
+  // Runs saved before notes and answers were separated hold everything in
+  // one block, which would read as an answer. Show it as a transcript instead.
+  const legacy = saved.status === 'done' && saved.notes === undefined && Boolean(saved.answer);
+  const turn = legacy ? { ...saved, notes: [saved.answer], answer: '', legacy: true } : saved;
   const article = el('article', 'turn');
-  article.append(el('div', 'turn-prompt', turn.prompt));
+  const head = el('div', 'turn-head');
+  head.append(el('div', 'turn-prompt', turn.prompt));
+  if (turn.status !== 'running') {
+    const remove = el('button', 'turn-remove');
+    remove.type = 'button';
+    remove.title = 'Remove from this project';
+    remove.setAttribute('aria-label', 'Remove this run');
+    remove.append(icon('close'));
+    remove.addEventListener('click', async () => {
+      try {
+        state.project = await api.removeTurn(state.project.id, turn.id);
+        renderThread();
+        updateComposer();
+      } catch (error) {
+        toast(cleanError(error));
+      }
+    });
+    head.append(remove);
+  }
+  article.append(head);
 
   const agentName = AGENT_INFO[turn.agent]?.name || turn.agent;
   const model = turn.model ? modelLabel(turn.agent, turn.model) : null;
   const stateLabel = turn.status === 'running' ? 'Working' : turn.status === 'done' ? 'Done' : 'Stopped';
   const meta = el('div', 'turn-meta');
   const status = el('span', `state${turn.status === 'running' ? ' live' : turn.status === 'stopped' ? ' failed' : ''}`, stateLabel);
-  meta.append(el('span', null, model ? `${agentName}, ${model}` : agentName), el('span', null, formatTime(turn.createdAt)), status);
+  const reaBadge = el('span', 'rea-badge');
+  meta.append(el('span', null, model ? `${agentName}, ${model}` : agentName), el('span', null, formatTime(turn.createdAt)), status, reaBadge);
   article.append(meta);
 
   const live = el('div', 'live-line');
   live.append(el('span', 'pulse'), el('span', null, 'Starting'));
   live.hidden = turn.status !== 'running';
 
+  const answer = el('div', 'answer markdown');
+  if (turn.legacy) {
+    answer.className = 'legacy-note';
+    answer.textContent = 'This run was saved before Unbox kept the final summary separate, so its progress notes and summary are together under How it got there. Ask again to get a single summary.';
+  }
+  const output = el('section', 'output');
+  const error = el('div', 'turn-error');
+
   const activity = el('details', 'activity');
   const summary = el('summary');
+  const notes = el('div', 'activity-notes');
   const list = el('ul', 'activity-list');
-  activity.append(summary, list);
+  activity.append(summary, notes, list);
+  for (const note of turn.notes || []) notes.append(noteItem(note));
   for (const scanned of turn.scans || []) list.append(scanItem(scanned));
   for (const step of turn.steps || []) list.append(stepItem(step));
 
-  const answer = el('div', 'answer markdown');
-  const error = el('div', 'turn-error');
-  article.append(live, activity, answer, error);
-
-  const view = { turn, status, live, activity, summary, list, answer, error };
+  // The files a run produced are its result, so they come first.
+  article.append(live, output, answer, error, activity);
+  const view = { turn, status, reaBadge, live, activity, summary, notes, list, answer, output, error };
   refreshTurn(view);
   if (turn.status === 'running') liveViews.set(turn.id, view);
   return article;
 }
 
+function noteItem(text) {
+  const note = el('div', 'note markdown');
+  window.renderMarkdown(note, text);
+  return note;
+}
+
 function scanItem(scanned) {
   const item = el('li', 'scan');
   const detail = scanned.ok ? scanned.headline || scanned.kind : scanned.error?.message || 'REA could not read this file.';
-  item.append(el('span', 'step-name', `Scanned ${scanned.name}`), el('span', 'step-detail', detail));
+  item.append(el('span', 'source rea', 'REA'), el('span', 'step-name', `Scanned ${scanned.name}`), el('span', 'step-detail', detail));
   item.title = detail;
   return item;
 }
 
 function stepItem(step) {
+  const source = stepSource(step);
+  const detail = stepDetail(step);
   const item = el('li');
-  item.append(el('span', 'step-name', step.name), el('span', 'step-detail', step.detail || ''));
+  item.append(el('span', `source ${source}`, SOURCE_LABELS[source] || 'Tool'), el('span', 'step-name', step.name), el('span', 'step-detail', detail));
   item.title = step.detail || '';
   return item;
 }
 
+// Shorter labels for steps saved before the agent runner tidied them:
+// no shell wrapper, file names instead of full paths.
+function stepDetail(step) {
+  const detail = String(step.detail || '');
+  if (step.name === 'shell') {
+    const inner = /^\S*\/(?:ba|z)?sh\s+-l?c\s+([\s\S]*)$/.exec(detail)?.[1] ?? detail;
+    return inner.replace(/^(['"])([\s\S]*)\1$/, '$2');
+  }
+  if (detail.startsWith('/')) return detail.split(/,\s*/).map((part) => part.split('/').pop()).join(', ');
+  return detail;
+}
+
+function outputList(turn) {
+  const files = turn.files || [];
+  if (!files.length) return [];
+  const heading = el('div', 'output-head');
+  heading.append(el('span', null, `Output, ${plural(files.length, 'file')}`));
+  const reveal = el('button', 'link', 'Show in Finder');
+  reveal.type = 'button';
+  reveal.addEventListener('click', () => api.revealProjectFile(state.project.id, files[0].path).catch((error) => toast(cleanError(error))));
+  heading.append(reveal);
+  const list = el('ul', 'output-list');
+  for (const file of files) {
+    const row = el('li');
+    const open = el('button', 'output-file');
+    open.type = 'button';
+    open.title = `Open ${file.path}`;
+    const dir = file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/') + 1) : '';
+    const name = el('span', 'output-name');
+    if (dir) name.append(el('span', 'output-dir', dir));
+    name.append(file.path.slice(dir.length));
+    open.append(icon('file'), name, el('span', 'output-meta', `${{ new: 'New', changed: 'Updated', linked: 'Linked' }[file.status] || 'File'}, ${formatBytes(file.size)}`));
+    open.addEventListener('click', () => openOutput(file.path));
+    row.append(open);
+    list.append(row);
+  }
+  return [heading, list];
+}
+
+async function openOutput(rel) {
+  try {
+    const result = await api.openProjectFile(state.project.id, rel);
+    if (result?.revealed) toast(`${rel} could run code, so it is shown in Finder instead of opened.`);
+  } catch (error) {
+    toast(cleanError(error));
+  }
+}
+
 function refreshTurn(view) {
   const { turn } = view;
-  const scans = turn.scans?.length || 0;
-  const steps = turn.steps?.length || 0;
+  const steps = turn.steps || [];
+  const counts = { rea: (turn.scans || []).length, shell: 0, files: 0, other: 0 };
+  for (const step of steps) counts[stepSource(step)] += 1;
+  const reaCalls = counts.rea;
+
+  // Whether REA did the reading is the key fact, so it sits in the meta row.
+  view.reaBadge.className = `rea-badge ${reaCalls ? 'used' : turn.status === 'running' ? 'pending' : 'unused'}`;
+  view.reaBadge.textContent = reaCalls ? `REA, ${plural(reaCalls, 'call')}` : turn.status === 'running' ? '' : 'No REA calls';
+  view.reaBadge.hidden = !view.reaBadge.textContent;
+  view.reaBadge.title = reaCalls
+    ? 'The agent read the target through REA.'
+    : 'The agent answered without calling REA, so the answer is not backed by REA evidence.';
+
   const parts = [];
-  if (scans) parts.push(`scanned ${plural(scans, 'item')}`);
-  if (steps) parts.push(`took ${plural(steps, 'step')}`);
+  if (counts.rea) parts.push(plural(counts.rea, 'REA call'));
+  if (counts.shell) parts.push(plural(counts.shell, 'shell command'));
+  if (counts.files) parts.push(plural(counts.files, 'file step'));
+  if (turn.legacy) parts.push('saved transcript');
+  else if (turn.notes?.length) parts.push(plural(turn.notes.length, 'note'));
   view.activity.hidden = !parts.length;
-  view.summary.replaceChildren(icon('chevron'), `${parts.join(' and ').replace(/^./, (c) => c.toUpperCase())}`);
+  view.summary.replaceChildren(icon('chevron'), `How it got there: ${parts.join(', ')}`);
 
   if (turn.answer) window.renderMarkdown(view.answer, turn.answer);
-  view.answer.hidden = !turn.answer;
+  view.answer.hidden = !turn.answer && !turn.legacy;
+  view.output.replaceChildren(...outputList(turn));
+  view.output.hidden = !view.output.childNodes.length;
   view.error.textContent = turn.error || '';
   view.error.hidden = !turn.error;
 }
+
+// Links in answers point at files the agent wrote; open them in place.
+window.onMarkdownLink = (target) => openOutput(target);
 
 api.onRunEvent(({ projectId, turnId, event }) => {
   const view = liveViews.get(turnId);
   if (event.kind === 'done') {
     if (state.running?.turnId === turnId) state.running = null;
     if (state.project?.id === projectId) {
-      const index = state.project.turns.findIndex((turn) => turn.id === turnId);
-      if (index >= 0) state.project.turns[index] = event.turn;
+      if (event.discarded) {
+        // Nothing ran: drop the run, give the request back, explain once.
+        state.project.turns = state.project.turns.filter((turn) => turn.id !== turnId);
+        if (!$('prompt').value.trim()) {
+          $('prompt').value = event.prompt || '';
+          autosize();
+        }
+        state.notice = event.text;
+      } else {
+        const index = state.project.turns.findIndex((turn) => turn.id === turnId);
+        if (index >= 0) state.project.turns[index] = event.turn;
+      }
       renderThread();
       renderTargets();
       updateComposer();
@@ -826,18 +964,20 @@ api.onRunEvent(({ projectId, turnId, event }) => {
   if (!view) return;
   const liveText = view.live.lastElementChild;
   if (event.kind === 'scan') {
-    if (event.state === 'running') liveText.textContent = `Scanning ${event.name}: ${event.text}`;
+    if (event.state === 'running') liveText.textContent = `REA is scanning ${event.name}: ${event.text}`;
     if (event.state === 'done') {
       view.turn.scans.push(event.summary);
       view.list.append(scanItem(event.summary));
     }
   } else if (event.kind === 'tool') {
-    view.turn.steps.push({ name: event.name, detail: event.detail });
+    view.turn.steps.push({ name: event.name, detail: event.detail, source: event.source });
     view.list.append(stepItem(event));
-    liveText.textContent = [event.name, event.detail].filter(Boolean).join('  ');
+    liveText.textContent = `${SOURCE_LABELS[stepSource(event)] || 'Tool'}: ${[event.name, event.detail].filter(Boolean).join('  ')}`;
   } else if (event.kind === 'text') {
-    view.turn.answer = [view.turn.answer, event.text].filter(Boolean).join('\n\n');
-    liveText.textContent = 'Writing';
+    // Until the run ends, every message is a progress note.
+    (view.turn.notes ||= []).push(event.text);
+    view.notes.append(noteItem(event.text));
+    liveText.textContent = event.text.split('\n')[0].slice(0, 160);
   } else if (event.kind === 'status' || event.kind === 'error' || event.kind === 'tool_result') {
     liveText.textContent = event.text;
   }

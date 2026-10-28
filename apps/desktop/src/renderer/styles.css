@@ -517,3 +517,72 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round
   font-size: 13px;
   animation: rise 0.18s ease-out;
 }
+
+/* Turn: header, REA badge, output, provenance */
+
+.turn-head { display: flex; align-items: flex-start; gap: 12px; }
+.turn-head .turn-prompt { flex: 1; min-width: 0; }
+.turn-remove {
+  width: 26px; height: 26px; flex: none; display: grid; place-items: center;
+  border: 0; border-radius: 7px; background: transparent; color: var(--dim);
+  opacity: 0; transition: opacity 0.15s;
+}
+.turn:hover .turn-remove, .turn-remove:focus-visible { opacity: 1; }
+.turn-remove:hover { background: var(--glass-hover); color: var(--frost); }
+.turn-remove svg { width: 13px; height: 13px; }
+
+.rea-badge { padding: 0 8px; border-radius: 999px; font-size: 12px; line-height: 20px; }
+.rea-badge.used { color: var(--mint); background: rgba(143, 217, 182, 0.1); }
+.rea-badge.unused { color: var(--amber); background: rgba(242, 201, 139, 0.1); }
+
+.output {
+  margin-top: 18px;
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  overflow: hidden;
+}
+.output-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; border-bottom: 1px solid var(--hairline);
+  font-size: 13px; color: var(--haze);
+}
+.output-head .link { padding: 0; border: 0; background: none; color: var(--dim); font-size: 12.5px; }
+.output-head .link:hover { color: var(--frost); }
+.output-list { list-style: none; margin: 0; padding: 4px; }
+.output-file {
+  width: 100%; display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; text-align: left;
+}
+.output-file:hover { background: var(--glass-hover); }
+.output-file svg { width: 15px; height: 15px; flex: none; color: var(--haze); }
+.output-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12.5px; }
+.output-dir { color: var(--dim); }
+.output-meta { flex: none; font-size: 12px; color: var(--dim); }
+
+.answer + .output, .output + .turn-error { margin-top: 16px; }
+.activity { margin-top: 16px; }
+.activity-notes { display: grid; gap: 8px; margin: 12px 0 0; padding-left: 14px; border-left: 1px solid var(--edge); }
+.activity-notes:empty { display: none; }
+.note.markdown { font-size: 13px; line-height: 1.55; color: var(--haze); max-width: 72ch; }
+.note.markdown > * + * { margin-top: 6px; }
+.activity-list li { align-items: baseline; }
+.source {
+  flex: none; width: 44px; text-align: center; padding: 1px 0; border-radius: 6px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.01em;
+  color: var(--dim); background: rgba(255, 255, 255, 0.05);
+}
+.source.rea { color: var(--mint); background: rgba(143, 217, 182, 0.1); }
+.source.shell { color: var(--amber); background: rgba(242, 201, 139, 0.08); }
+
+.md-link {
+  padding: 0; border: 0; background: none; font: inherit; color: var(--ice);
+  text-decoration: underline; text-decoration-color: rgba(185, 208, 255, 0.35); text-underline-offset: 3px; cursor: pointer;
+}
+.md-link:hover { text-decoration-color: var(--ice); }
+.md-link-text { text-decoration: underline dotted; text-underline-offset: 3px; }
+
+.composer-hint.error { color: var(--rose); }
+.composer-hint.error button { color: var(--frost); }
+
+.legacy-note { margin-top: 16px; font-size: 13px; color: var(--dim); max-width: 64ch; }

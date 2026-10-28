@@ -81,9 +81,8 @@ function modelsFor(id) {
   }
   const { configured, listed } = codexModels();
   const onPlan = [...listed];
-  if (configured && MODEL_ID.test(configured) && !onPlan.some((model) => model.id === configured)) {
-    onPlan.unshift({ id: configured, description: 'Set as your Codex default' });
-  }
+  // The configured default is not listed as "on your plan" unless Codex says
+  // so: a ChatGPT plan can reject it (gpt-5.5 was).
   const planIds = new Set(onPlan.map((model) => model.id));
   return [
     { id: '', label: 'Default', description: configured ? `Your Codex default, ${gptLabel(configured)}` : "Codex's default", group: '' },
@@ -166,7 +165,7 @@ function claudeArgs(targetPaths) {
   ];
 }
 
-function codexArgs(workspace) {
+function codexArgs(workspace, lastMessageFile) {
   const server = mcpServer();
   return [
     'exec',
@@ -184,6 +183,8 @@ function codexArgs(workspace) {
     // `codex exec` never prompts, so unapproved MCP calls are refused.
     // Pre-approve REA's tools only; the shell stays sandboxed.
     '-c', 'mcp_servers.rea.default_tools_approval_mode="approve"',
+    // The final message, written by Codex itself, is the answer.
+    '-o', lastMessageFile,
     '-',
   ];
 }
@@ -191,7 +192,8 @@ function codexArgs(workspace) {
 // Starts an agent run and reports normalized events:
 //   { kind: 'status' | 'text' | 'tool' | 'tool_result' | 'error' | 'done', ... }
 function runAgent({ id, model, prompt, workspace, targetPaths, onEvent }) {
-  const args = id === 'claude' ? claudeArgs(targetPaths) : codexArgs(workspace);
+  const lastMessageFile = path.join(os.tmpdir(), `unbox-${process.pid}-${Date.now()}-last-message.md`);
+  const args = id === 'claude' ? claudeArgs(targetPaths) : codexArgs(workspace, lastMessageFile);
   // Right after `-p` / `exec`. An empty model leaves the CLI on its default.
   if (model) args.splice(1, 0, id === 'claude' ? '--model' : '-m', model);
   const env = childEnv(id === 'claude' ? { MCP_TOOL_TIMEOUT: '600000', MCP_TIMEOUT: '120000' } : {});
@@ -205,9 +207,26 @@ function runAgent({ id, model, prompt, workspace, targetPaths, onEvent }) {
   let pending = '';
   let finished = false;
   let stderrTail = '';
+  let pendingDone = null;
   const emit = (event) => {
+    if (finished) return;
+    // Codex may report the turn complete before writing its last message,
+    // so its "done" waits for the process to exit.
+    if (event.kind === 'done' && id === 'codex' && child.exitCode === null && !event.final) {
+      pendingDone = event;
+      return;
+    }
     if (event.kind === 'done') finished = true;
     onEvent(event);
+  };
+  const finalAnswer = () => {
+    try {
+      return fs.readFileSync(lastMessageFile, 'utf8').trim();
+    } catch {
+      return '';
+    } finally {
+      fs.rmSync(lastMessageFile, { force: true });
+    }
   };
 
   child.stdout.on('data', (chunk) => {
@@ -230,9 +249,11 @@ function runAgent({ id, model, prompt, workspace, targetPaths, onEvent }) {
   });
   child.on('error', (error) => emit({ kind: 'done', ok: false, text: error.message }));
   child.on('close', (code, signal) => {
+    const answer = id === 'codex' ? finalAnswer() : '';
     if (finished) return;
-    if (signal) return emit({ kind: 'done', ok: false, text: 'Stopped.' });
-    emit({ kind: 'done', ok: code === 0, text: code === 0 ? '' : lastLine(stderrTail) || `Exited with code ${code}.` });
+    if (pendingDone) return emit({ ...pendingDone, final: true, answer: pendingDone.ok ? answer : '' });
+    if (signal) return emit({ kind: 'done', ok: false, final: true, text: 'Stopped.' });
+    emit({ kind: 'done', ok: code === 0, final: true, answer: code === 0 ? answer : '', text: code === 0 ? '' : lastLine(stderrTail) || `Exited with code ${code}.` });
   });
   child.stdin.end(prompt);
 
@@ -257,7 +278,7 @@ function* claudeEvents(event) {
   if (event.type === 'assistant') {
     for (const part of event.message?.content || []) {
       if (part.type === 'text' && part.text.trim()) yield { kind: 'text', text: part.text };
-      if (part.type === 'tool_use') yield { kind: 'tool', name: toolName(part.name), detail: describeInput(part.input) };
+      if (part.type === 'tool_use') yield { kind: 'tool', name: toolName(part.name), detail: describeInput(part.input), source: claudeSource(part.name) };
     }
     return;
   }
@@ -274,6 +295,8 @@ function* claudeEvents(event) {
     yield {
       kind: 'done',
       ok: !event.is_error,
+      // Claude Code puts its final message in the result event.
+      answer: event.is_error ? '' : String(event.result || '').trim(),
       text: /authenticat|oauth|log ?in/i.test(message)
         ? 'Your Claude sign-in has expired. In Terminal, run claude auth login.'
         : message,
@@ -301,16 +324,29 @@ function* codexEvents(event) {
   } else if (event.type === 'turn.completed') {
     yield { kind: 'done', ok: true, text: '' };
   } else if (event.type === 'item.started' && item) {
-    if (item.type === 'mcp_tool_call') yield { kind: 'tool', name: item.tool || item.name, detail: describeInput(item.arguments) };
-    if (item.type === 'command_execution') yield { kind: 'tool', name: 'shell', detail: item.command };
+    if (item.type === 'mcp_tool_call') yield { kind: 'tool', name: item.tool || item.name, detail: describeInput(item.arguments), source: !item.server || item.server === 'rea' ? 'rea' : 'other' };
+    if (item.type === 'command_execution') yield { kind: 'tool', name: 'shell', detail: shellCommand(item.command), source: 'shell' };
   } else if (event.type === 'item.completed' && item) {
     if (item.type === 'agent_message' && item.text) yield { kind: 'text', text: item.text };
-    if (item.type === 'file_change') yield { kind: 'tool', name: 'write', detail: (item.changes || []).map((c) => c.path).join(', ') };
+    if (item.type === 'file_change') yield { kind: 'tool', name: 'write', detail: (item.changes || []).map((c) => path.basename(c.path)).join(', '), source: 'files' };
     if (item.type === 'mcp_tool_call' && item.status === 'failed') {
       yield { kind: 'tool_result', ok: false, text: flatten(item.error?.message || item.result).slice(0, 400) };
     }
     if (item.type === 'error') yield { kind: 'status', text: item.message };
   }
+}
+
+function claudeSource(name) {
+  if (String(name).startsWith('mcp__rea__')) return 'rea';
+  if (name === 'Bash') return 'shell';
+  return 'files';
+}
+
+// Codex wraps commands as /bin/zsh -lc "..."; show only the inner command.
+function shellCommand(command) {
+  const text = String(command || '');
+  const inner = /^\S*\/(?:ba|z)?sh\s+-l?c\s+([\s\S]*)$/.exec(text)?.[1] ?? text;
+  return inner.replace(/^(['"])([\s\S]*)\1$/, '$2').slice(0, 200);
 }
 
 function toolName(name) {

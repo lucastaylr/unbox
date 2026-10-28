@@ -31,7 +31,17 @@ function buildPrompt({ prompt, targets }) {
   }
   lines.push('', 'Request:', prompt.trim());
   lines.push('', 'Rules:', ...RULES.map((line) => `- ${line}`));
-  lines.push('', 'Answer in Markdown. Lead with the direct answer, then the supporting evidence.');
+  lines.push(
+    '',
+    'Final message:',
+    '- Short progress updates while you work are fine; Unbox shows them separately as notes.',
+    '- Your last message is shown to the user as the result. Make it one complete, self-contained summary in Markdown, written after the work is done:',
+    '  1. The direct answer in one or two sentences.',
+    '  2. What you found, with REA evidence IDs.',
+    '  3. Files you wrote, as relative Markdown links such as [REPORT.md](REPORT.md).',
+    '  4. Limits: what is inferred, unverified or could not be analyzed.',
+    '- Do not narrate steps or plans in the final message, and do not repeat earlier progress updates.',
+  );
   return lines.join('\n');
 }
 

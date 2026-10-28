@@ -5,15 +5,40 @@
 // inject markup. Supports headings, paragraphs, lists, fenced code, inline
 // code and bold.
 (function () {
+  // [label](target): relative targets are files the agent wrote and open
+  // through window.onMarkdownLink; web addresses are shown, never navigated.
+  function link(label, target) {
+    const external = /^[a-z][\w+.-]*:/i.test(target);
+    if (external || !window.onMarkdownLink) {
+      const span = document.createElement('span');
+      span.className = 'md-link-text';
+      span.textContent = label;
+      span.title = target;
+      return span;
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'md-link';
+    button.textContent = label;
+    button.title = `Open ${target}`;
+    button.addEventListener('click', () => window.onMarkdownLink(target.replace(/#.*$/, '')));
+    return button;
+  }
+
   function inline(parent, text) {
-    const pattern = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+    const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\))/g;
     let last = 0;
     for (const match of text.matchAll(pattern)) {
       if (match.index > last) parent.append(text.slice(last, match.index));
       const token = match[0];
-      const node = document.createElement(token.startsWith('`') ? 'code' : 'strong');
-      node.textContent = token.startsWith('`') ? token.slice(1, -1) : token.slice(2, -2);
-      parent.append(node);
+      if (token.startsWith('[')) {
+        const [, label, target] = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(token);
+        parent.append(link(label.replace(/\*\*|`/g, ''), target));
+      } else {
+        const node = document.createElement(token.startsWith('`') ? 'code' : 'strong');
+        node.textContent = token.startsWith('`') ? token.slice(1, -1) : token.slice(2, -2);
+        parent.append(node);
+      }
       last = match.index + token.length;
     }
     if (last < text.length) parent.append(text.slice(last));

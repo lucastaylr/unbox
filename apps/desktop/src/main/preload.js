@@ -23,6 +23,9 @@ contextBridge.exposeInMainWorld('unbox', {
   dropTargets: (id, files) => ipcRenderer.invoke('projects:drop', id, [...files].map((file) => webUtils.getPathForFile(file))),
   removeTarget: (id, targetPath) => ipcRenderer.invoke('projects:remove', id, targetPath),
   revealProject: (id) => ipcRenderer.invoke('projects:reveal', id),
+  openProjectFile: (id, rel) => ipcRenderer.invoke('projects:openFile', id, rel),
+  revealProjectFile: (id, rel) => ipcRenderer.invoke('projects:revealFile', id, rel),
+  removeTurn: (id, turnId) => ipcRenderer.invoke('projects:removeTurn', id, turnId),
 
   startRun: (id, request) => ipcRenderer.invoke('run:start', id, request),
   stopRun: () => ipcRenderer.invoke('run:stop'),

@@ -167,7 +167,36 @@ ipcMain.handle('setup:run', async (_event, actionId) => {
 
 ipcMain.handle('projects:list', () => store.list());
 ipcMain.handle('projects:create', (_event, name) => store.create(name));
-ipcMain.handle('projects:get', (_event, id) => store.get(id));
+ipcMain.handle('projects:get', (_event, id) => {
+  const project = store.get(id);
+  if (!project.turns.some((turn) => turn.files === undefined)) return project;
+  // Bring runs saved by earlier versions in line with how runs work now.
+  return store.update(id, (draft) => {
+    draft.turns = draft.turns.filter((turn) => turn.status === 'done' || turn.steps?.length || turn.answer);
+    for (const turn of draft.turns) {
+      if (turn.files === undefined) turn.files = linkedFiles(id, turn.answer);
+    }
+  });
+});
+
+// Files that an answer links to and that exist in the project, for runs
+// recorded before output files were tracked.
+function linkedFiles(id, answer) {
+  const files = [];
+  for (const [, target] of String(answer || '').matchAll(/\]\(([^)\s#]+)[^)]*\)/g)) {
+    if (/^[a-z][\w+.-]*:/i.test(target)) continue;
+    try {
+      const full = projectFile(id, target);
+      const rel = path.relative(store.dir(id), full).split(path.sep).join('/');
+      if (!files.some((file) => file.path === rel) && fs.statSync(full).isFile()) {
+        files.push({ path: rel, size: fs.statSync(full).size, status: 'linked' });
+      }
+    } catch {
+      // missing or outside the project: not listed
+    }
+  }
+  return files;
+}
 ipcMain.handle('projects:rename', (_event, id, name) => store.rename(id, name));
 
 ipcMain.handle('projects:add', async (_event, id, kind) => {
@@ -259,7 +288,9 @@ async function executeRun(projectId, turn, controller) {
 
   const fullPrompt = buildPrompt({ prompt: turn.prompt, targets: project.targets });
   fs.writeFileSync(path.join(workspace, 'last-prompt.md'), fullPrompt);
-  const answer = [];
+  const before = snapshotFiles(workspace);
+  // The agent's last message is the answer; earlier ones are progress notes.
+  const messages = [];
   activeRun.agent = runAgent({
     id: turn.agent,
     model: turn.model,
@@ -267,10 +298,17 @@ async function executeRun(projectId, turn, controller) {
     workspace,
     targetPaths: project.targets.map((target) => target.path),
     onEvent: (event) => {
-      if (event.kind === 'text') answer.push(event.text);
-      if (event.kind === 'tool') turn.steps.push({ name: event.name, detail: event.detail });
+      if (event.kind === 'text') messages.push(event.text);
+      if (event.kind === 'tool') turn.steps.push({ name: event.name, detail: event.detail, source: event.source });
       if (event.kind === 'done') {
-        turn.answer = answer.join('\n\n');
+        // The CLI's own final message is the answer; everything said before
+        // it is a progress note. Fall back to the last message if the CLI
+        // did not report one.
+        const answer = (event.answer || messages.at(-1) || '').trim();
+        const lastIsAnswer = messages.length && messages.at(-1).trim() === answer;
+        turn.notes = lastIsAnswer ? messages.slice(0, -1) : messages.filter((text) => text.trim() !== answer);
+        turn.answer = answer;
+        turn.files = changedFiles(before, snapshotFiles(workspace));
         return finishTurn(projectId, turn, event);
       }
       emit(projectId, turn.id, event);
@@ -278,18 +316,101 @@ async function executeRun(projectId, turn, controller) {
   });
 }
 
+// Files Unbox itself writes, which are not the agent's output.
+const UNBOX_FILES = /^(project\.json|last-prompt\.md|scan-\d+-.*\.json)$|(^|\/)\.DS_Store$/;
+
+function snapshotFiles(root) {
+  const files = new Map();
+  const walk = (dir, depth) => {
+    if (depth > 6 || files.size > 4000) return;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full, depth + 1);
+      else if (entry.isFile()) {
+        const rel = path.relative(root, full).split(path.sep).join('/');
+        if (UNBOX_FILES.test(rel)) continue;
+        const stat = fs.statSync(full);
+        files.set(rel, { size: stat.size, mtime: stat.mtimeMs });
+      }
+    }
+  };
+  walk(root, 0);
+  return files;
+}
+
+function changedFiles(before, after) {
+  const changed = [];
+  for (const [rel, info] of after) {
+    const old = before.get(rel);
+    if (!old) changed.push({ path: rel, size: info.size, status: 'new' });
+    else if (old.mtime !== info.mtime || old.size !== info.size) changed.push({ path: rel, size: info.size, status: 'changed' });
+  }
+  return changed.sort((a, b) => a.path.localeCompare(b.path)).slice(0, 60);
+}
+
 function finishTurn(projectId, turn, event) {
   if (turn.status !== 'running') return;
   turn.status = event.ok ? 'done' : 'stopped';
   turn.error = event.ok ? null : event.text || 'The run stopped.';
   turn.finishedAt = new Date().toISOString();
+  if (activeRun?.turnId === turn.id) activeRun = null;
+  // A run that failed before doing any work (expired sign-in, unknown model,
+  // stopped at once) is not kept; the error is shown once and the request
+  // goes back into the composer.
+  // Scan results live on the target itself, so a scan alone is not work.
+  const didWork = turn.steps.length || turn.answer || turn.notes?.length || turn.files?.length;
+  if (!event.ok && !didWork) {
+    store.update(projectId, (draft) => {
+      draft.turns = draft.turns.filter((item) => item.id !== turn.id);
+    });
+    emit(projectId, turn.id, { kind: 'done', ok: false, discarded: true, text: turn.error, prompt: turn.prompt });
+    return;
+  }
   store.update(projectId, (draft) => {
     const index = draft.turns.findIndex((item) => item.id === turn.id);
     if (index >= 0) draft.turns[index] = turn;
   });
-  if (activeRun?.turnId === turn.id) activeRun = null;
   emit(projectId, turn.id, { kind: 'done', ok: event.ok, text: turn.error, turn });
 }
+
+// Resolves a path the agent mentioned to a file inside the project, or fails.
+function projectFile(id, rel) {
+  const root = store.dir(id);
+  const full = path.resolve(root, String(rel || ''));
+  if (!full.startsWith(root + path.sep)) throw new Error('Only files inside this project can be opened.');
+  if (!fs.existsSync(full)) throw new Error('That file no longer exists.');
+  return full;
+}
+
+// Opens a project file in its default app. Anything that could run (apps,
+// scripts, executables) is shown in Finder instead of opened.
+ipcMain.handle('projects:openFile', async (_event, id, rel) => {
+  const full = projectFile(id, rel);
+  const stat = fs.statSync(full);
+  const runnable = /\.(app|command|tool|sh|zsh|bash|pkg|mpkg|scpt|terminal|workflow|jar)$/i.test(full) || (stat.isFile() && stat.mode & 0o111);
+  if (stat.isDirectory() || !runnable) {
+    const error = await shell.openPath(full);
+    if (!error) return { opened: true };
+  }
+  shell.showItemInFolder(full);
+  return { revealed: true };
+});
+
+ipcMain.handle('projects:revealFile', (_event, id, rel) => shell.showItemInFolder(projectFile(id, rel)));
+
+ipcMain.handle('projects:removeTurn', (_event, id, turnId) => {
+  if (activeRun?.turnId === turnId) throw new Error('Stop this run before removing it.');
+  return store.update(id, (draft) => {
+    draft.turns = draft.turns.filter((item) => item.id !== turnId);
+  });
+});
 
 /* App lifecycle */
 
