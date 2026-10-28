@@ -181,6 +181,7 @@
     "es2023": true
   },
   "ignorePatterns": [
+    "apps/desktop",
     "dist",
     "build",
     "node_modules",

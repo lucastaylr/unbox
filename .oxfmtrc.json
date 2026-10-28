@@ -4,6 +4,7 @@
   "sortImports": false,
   "sortPackageJson": false,
   "ignorePatterns": [
+    "apps/desktop/**",
     "dist/**",
     "build/**",
     "docs/api/**",

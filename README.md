@@ -26,6 +26,12 @@
 
 </div>
 
+> [!NOTE]
+> **This is Unbox, a fork of REA with a desktop app.** The app lives in
+> [`apps/desktop`](apps/desktop/README.md): open a file, scan it with REA, and
+> let Claude Code or Codex explain or reconstruct it using your own plan, with no
+> API keys. See its README for install steps. Everything below is upstream REA.
+
 > [!IMPORTANT]
 > Get REA from [morluto/rea](https://github.com/morluto/rea),
 > [rea.tools](https://rea.tools/), or the [rea-agents npm package](https://www.npmjs.com/package/rea-agents).

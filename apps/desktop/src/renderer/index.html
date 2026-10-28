@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'"
+    />
+    <title>Unbox</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="titlebar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 2.5 3.5 7v10L12 21.5 20.5 17V7L12 2.5Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+          <path d="M3.5 7 12 11.5 20.5 7M12 11.5v10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+        </svg>
+        <span>Unbox</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <section class="side-section">
+          <div class="side-heading">
+            <h2>Environment</h2>
+            <button class="icon-button" id="refresh" title="Check again" aria-label="Check environment again">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+          </div>
+          <ul class="status-list" id="env-status">
+            <li class="status-row is-pending"><span class="dot"></span><div><strong>Checking…</strong></div></li>
+          </ul>
+        </section>
+        <section class="side-section">
+          <h2>Agents</h2>
+          <ul class="status-list" id="agent-status"></ul>
+          <p class="side-note">Unbox runs your own Claude Code or Codex sign-in. It never asks for or uses API keys.</p>
+        </section>
+        <footer class="side-footer">Built on REA · MIT</footer>
+      </aside>
+
+      <main class="content" id="content">
+        <section class="dropzone" id="dropzone">
+          <div class="dropzone-icon" aria-hidden="true">
+            <svg viewBox="0 0 48 48"><path d="M24 5 7 14v20l17 9 17-9V14L24 5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" /><path d="M7 14l17 9 17-9M24 23v20" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" /></svg>
+          </div>
+          <h1>Open something to unbox</h1>
+          <p>Drop an app, binary, package or JavaScript project folder here. Unbox inspects it without running it.</p>
+          <div class="actions">
+            <button class="button primary" id="pick-file">Choose file</button>
+            <button class="button" id="pick-folder">Choose folder</button>
+          </div>
+          <ul class="chips" aria-label="Examples of supported targets">
+            <li>.app</li><li>Mach-O · ELF · PE</li><li>.asar</li><li>.apk</li><li>.dll (.NET)</li><li>.wasm</li><li>.pyc</li><li>JS folder</li>
+          </ul>
+        </section>
+
+        <section class="workspace hidden" id="workspace">
+          <div class="target">
+            <div class="target-icon" id="target-icon" aria-hidden="true"></div>
+            <div class="target-text">
+              <h1 id="target-name"></h1>
+              <p class="mono muted" id="target-path"></p>
+            </div>
+            <button class="button ghost" id="change-target">Change</button>
+          </div>
+
+          <article class="card" id="scan-card">
+            <header class="card-header">
+              <span class="step">1</span>
+              <div>
+                <h2>Scan</h2>
+                <p class="muted">REA reads the file statically and reports what it can see.</p>
+              </div>
+              <span class="badge" id="scan-badge"></span>
+            </header>
+            <div class="progress hidden" id="scan-progress">
+              <div class="bar"><span></span></div>
+              <p class="muted" id="scan-message">Starting…</p>
+            </div>
+            <div id="scan-result"></div>
+          </article>
+
+          <article class="card" id="agent-card">
+            <header class="card-header">
+              <span class="step">2</span>
+              <div>
+                <h2>Ask an agent</h2>
+                <p class="muted">The agent uses REA's tools to dig deeper and writes its results to a workspace folder.</p>
+              </div>
+            </header>
+            <div class="form-row">
+              <label class="label">Agent</label>
+              <div class="segmented" id="agent-picker" role="radiogroup" aria-label="Agent"></div>
+            </div>
+            <div class="form-row">
+              <label class="label">Task</label>
+              <div class="segmented" id="task-picker" role="radiogroup" aria-label="Task"></div>
+            </div>
+            <div class="form-row hidden" id="question-row">
+              <label class="label" for="question">Question</label>
+              <textarea id="question" rows="3" placeholder="How does search work in this app?"></textarea>
+            </div>
+            <div class="run-row">
+              <p class="muted small" id="agent-hint"></p>
+              <div class="actions">
+                <button class="button hidden" id="stop-agent">Stop</button>
+                <button class="button primary" id="run-agent">Run</button>
+              </div>
+            </div>
+            <div class="transcript hidden" id="transcript"></div>
+            <div class="done-row hidden" id="done-row">
+              <button class="button" id="open-workspace">Open workspace folder</button>
+              <button class="button primary" id="view-report">View report</button>
+            </div>
+          </article>
+
+          <article class="card hidden" id="report-card">
+            <header class="card-header">
+              <span class="step">3</span>
+              <div><h2>Report</h2><p class="muted">REPORT.md from the workspace.</p></div>
+            </header>
+            <div class="markdown" id="report"></div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <div class="drop-overlay hidden" id="drop-overlay"><div>Drop to unbox</div></div>
+    <script src="markdown.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
