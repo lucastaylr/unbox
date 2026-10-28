@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const { childEnv, which, capture } = require('./env');
+const { childEnv, which, capture, ghidraLocation } = require('./env');
 
 // Published REA release used when this fork has not been built locally.
 const REA_PACKAGE = 'rea-agents@6.8.0';
@@ -12,14 +12,15 @@ const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 const repoRoot = path.resolve(__dirname, '..', '..', '..', '..');
 
-// Prefer the fork's own build so local REA changes show up in the app.
-// Otherwise fall back to the pinned npm release.
+// Prefer the fork's own build so local REA changes show up in the app, then
+// an installed `rea` (fast to start), then the pinned npm release via npx.
 function reaCommand() {
   const forkCli = path.join(repoRoot, 'scripts', 'rea.mjs');
   if (fs.existsSync(path.join(repoRoot, 'dist', 'cli.js')) && fs.existsSync(forkCli)) {
-    return { command: 'node', args: [forkCli], source: 'fork build' };
+    return { command: 'node', args: [forkCli], source: 'fork' };
   }
-  return { command: 'npx', args: ['-y', REA_PACKAGE], source: REA_PACKAGE };
+  if (which('rea')) return { command: 'rea', args: [], source: 'installed' };
+  return { command: 'npx', args: ['-y', REA_PACKAGE], source: 'npx' };
 }
 
 function nodeVersionSupported(version) {
@@ -38,7 +39,10 @@ async function reaStatus(workspaceRoot) {
   const invocation = reaCommand();
   const status = {
     node: { path: nodePath, version: nodeVersion, supported: nodeVersionSupported(nodeVersion) },
+    brew: Boolean(which('brew')),
     source: invocation.source,
+    version: null,
+    ghidra: ghidraLocation(),
     engines: [],
     ready: false,
     hint: null,
@@ -61,8 +65,21 @@ async function reaStatus(workspaceRoot) {
     return status;
   }
   status.ready = true;
-  status.engines = (report.providerInspections || [])
-    .map((provider) => ({ id: provider.id, available: Boolean(provider.available) }));
+  status.engines = (report.providerInspections || []).map((provider) => {
+    // REA's first failed check is the most useful reason to show.
+    const failed = (provider.checks || []).find((check) => check.ok === false);
+    return {
+      id: provider.id,
+      available: Boolean(provider.available),
+      version: provider.providerVersion || null,
+      configured: Boolean(provider.configured),
+      problem: failed ? { code: failed.code, detail: failed.detail } : null,
+    };
+  });
+  if (invocation.source !== 'npx') {
+    const version = await capture(invocation.command, [...invocation.args, '--version'], { cwd: workspaceRoot });
+    status.version = /\d+\.\d+\.\d+/.exec(version.stdout)?.[0] || null;
+  }
   return status;
 }
 

@@ -10,27 +10,7 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <!-- Setup: shown at launch, can be skipped -->
-    <section class="setup" id="setup" aria-labelledby="setup-title">
-      <div class="drag-strip"></div>
-      <div class="setup-panel glass">
-        <svg class="mark" viewBox="0 0 40 40" aria-hidden="true">
-          <path d="M20 4 6 11.5v17L20 36l14-7.5v-17L20 4Z" />
-          <path d="M6 11.5 20 19l14-7.5M20 19v17" />
-        </svg>
-        <h1 id="setup-title">Set up Unbox</h1>
-        <p class="lede" id="setup-summary">Checking what's installed on this Mac…</p>
-        <div class="setup-groups" id="setup-groups"></div>
-        <footer class="setup-actions">
-          <button class="btn quiet" id="setup-recheck" type="button">Check again</button>
-          <span class="spacer"></span>
-          <button class="btn" id="setup-skip" type="button">Skip for now</button>
-          <button class="btn solid" id="setup-continue" type="button">Continue</button>
-        </footer>
-      </div>
-    </section>
-
-    <div class="shell" id="shell" hidden>
+    <div class="shell" id="shell">
       <aside class="sidebar">
         <div class="drag-strip"></div>
         <button class="btn new-project" id="new-project" type="button">
@@ -74,17 +54,18 @@
                 <button class="icon-btn" id="add-button" type="button" aria-haspopup="menu" aria-expanded="false" title="Add files or a folder">
                   <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" /></svg>
                 </button>
-                <div class="menu glass" id="add-menu" role="menu" hidden>
+                <div class="menu" id="add-menu" role="menu" hidden>
                   <button type="button" role="menuitem" data-add="files">Add files…</button>
                   <button type="button" role="menuitem" data-add="folder">Add a folder…</button>
                 </div>
               </div>
               <div class="menu-anchor">
-                <button class="pill" id="agent-button" type="button" aria-haspopup="menu" aria-expanded="false">
-                  <span id="agent-label">Agent</span>
-                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
+                <button class="pill" id="model-button" type="button" aria-haspopup="menu" aria-expanded="false">
+                  <span class="pill-logo" id="model-logo"></span>
+                  <span id="model-label">Model</span>
+                  <svg class="pill-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
                 </button>
-                <div class="menu glass" id="agent-menu" role="menu" hidden></div>
+                <div class="menu model-menu" id="model-menu" role="menu" hidden></div>
               </div>
               <span class="spacer"></span>
               <button class="send" id="send" type="submit" aria-label="Send">
@@ -106,22 +87,47 @@
       </main>
     </div>
 
-    <dialog class="dialog glass" id="new-project-dialog" aria-labelledby="new-project-title">
+    <!-- Setup: opens at launch until everything is connected; always reachable from the sidebar. -->
+    <dialog class="dialog setup" id="setup-dialog" aria-labelledby="setup-title" autofocus>
+      <header class="setup-head">
+        <div>
+          <h2 id="setup-title">Connect Unbox</h2>
+          <p id="setup-summary">Unbox works through the AI plan you already have. Connect at least one.</p>
+        </div>
+        <button class="icon-btn close" id="setup-close" type="button" aria-label="Close setup">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15" /></svg>
+        </button>
+      </header>
+      <h3 class="setup-section">Your AI plan</h3>
+      <div class="agent-tiles" id="agent-tiles"></div>
+      <h3 class="setup-section">Tools on this Mac</h3>
+      <div class="tool-tiles" id="tool-tiles"></div>
+      <footer class="dialog-actions">
+        <button class="btn quiet" id="setup-recheck" type="button">Check again</button>
+        <span class="spacer"></span>
+        <button class="btn solid" id="setup-done" type="button">Done</button>
+      </footer>
+    </dialog>
+
+    <dialog class="dialog" id="new-project-dialog" aria-labelledby="new-project-title">
       <form method="dialog" id="new-project-form">
         <h2 id="new-project-title">Name your project</h2>
         <p>Use something you'll recognise later. You can rename it any time.</p>
         <input id="new-project-name" placeholder="Notes app search" maxlength="80" required spellcheck="false" />
         <div class="dialog-actions">
-          <button class="btn quiet" value="cancel" type="button" id="new-project-cancel">Cancel</button>
-          <button class="btn solid" value="create" type="submit">Create project</button>
+          <button class="btn quiet" type="button" id="new-project-cancel">Cancel</button>
+          <button class="btn solid" type="submit">Create project</button>
         </div>
       </form>
     </dialog>
 
+    <div class="toast" id="toast" role="status" hidden></div>
+
     <div class="drop-overlay" id="drop-overlay" hidden>
-      <div class="drop-target glass">Drop to add to <span id="drop-project"></span></div>
+      <div class="drop-target">Drop to add to <span id="drop-project"></span></div>
     </div>
 
+    <script src="brands.js"></script>
     <script src="markdown.js"></script>
     <script src="app.js"></script>
   </body>

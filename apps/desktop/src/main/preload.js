@@ -11,6 +11,9 @@ function subscribe(channel, callback) {
 contextBridge.exposeInMainWorld('unbox', {
   setupStatus: () => ipcRenderer.invoke('setup:status'),
   copy: (text) => ipcRenderer.invoke('clipboard:write', text),
+  runSetupAction: (actionId) => ipcRenderer.invoke('setup:run', actionId),
+  chooseGhidra: () => ipcRenderer.invoke('ghidra:choose'),
+  resetGhidra: () => ipcRenderer.invoke('ghidra:reset'),
 
   listProjects: () => ipcRenderer.invoke('projects:list'),
   createProject: (name) => ipcRenderer.invoke('projects:create', name),

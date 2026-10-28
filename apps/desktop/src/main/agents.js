@@ -2,30 +2,115 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const { spawn } = require('node:child_process');
-const { childEnv, which, capture } = require('./env');
+const { childEnv, analysisEnv, which, capture } = require('./env');
 const { reaCommand } = require('./rea');
 
 // Unbox drives the CLIs the user already has, signed in with their own
 // Claude or ChatGPT plan. It never asks for, stores or forwards API keys, and
 // childEnv() strips API-key variables so neither CLI falls back to API billing.
 const AGENTS = {
-  claude: { id: 'claude', name: 'Claude Code', command: 'claude', plan: 'Claude Pro or Max' },
-  codex: { id: 'codex', name: 'Codex', command: 'codex', plan: 'ChatGPT Plus, Pro or Team' },
+  claude: { id: 'claude', name: 'Claude Code', company: 'Anthropic', command: 'claude', plan: 'Claude Pro or Max' },
+  codex: { id: 'codex', name: 'Codex', company: 'OpenAI', command: 'codex', plan: 'ChatGPT Plus, Pro or Team' },
 };
+
+// Specific Claude models, newest first within each family. Most come from the
+// model table built into Claude Code; the 5.5 releases are passed through as
+// full IDs, which Claude Code forwards unchanged.
+const CLAUDE_MODELS = [
+  { id: 'claude-fable-5-1', label: 'Fable 5.1', group: 'Fable' },
+  { id: 'claude-fable-5', label: 'Fable 5', group: 'Fable' },
+  { id: 'claude-opus-5-5', label: 'Opus 5.5', group: 'Opus' },
+  { id: 'claude-opus-5', label: 'Opus 5', group: 'Opus' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8', group: 'Opus' },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', group: 'Sonnet' },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', group: 'Sonnet' },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', group: 'Sonnet' },
+  { id: 'claude-haiku-5-5', label: 'Haiku 5.5', group: 'Haiku' },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', group: 'Haiku' },
+];
+
+// GPT models the installed Codex knows about. Codex's own cache says which of
+// them the signed-in plan offers; the rest are listed separately because the
+// plan may not include them.
+const GPT_MODELS = [
+  'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-pro', 'gpt-6-sol', 'gpt-6-astra', 'gpt-6-luna',
+  'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.3-codex',
+];
+
+const MODEL_ID = /^[\w.:-]{1,80}$/;
+
+// gpt-6.1-sol -> GPT-6.1 Sol, gpt-5.3-codex -> GPT-5.3 Codex
+function gptLabel(slug) {
+  const [, version, rest] = /^gpt-([\d.]+)-?(.*)$/.exec(slug) || [];
+  if (!version) return slug;
+  const name = rest.split('-').filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1)).join(' ');
+  return `GPT-${version}${name ? ` ${name}` : ''}`;
+}
+
+function codexHome() {
+  return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+}
+
+// Codex caches the models offered to the signed-in account; the ones marked
+// "list" are the ones its own picker shows.
+function codexModels() {
+  let configured = null;
+  try {
+    configured = /^model\s*=\s*"([^"]+)"/m.exec(fs.readFileSync(path.join(codexHome(), 'config.toml'), 'utf8'))?.[1] || null;
+  } catch {
+    // no config file: Codex uses its built-in default
+  }
+  let listed = [];
+  try {
+    const cache = JSON.parse(fs.readFileSync(path.join(codexHome(), 'models_cache.json'), 'utf8'));
+    listed = (cache.models || [])
+      .filter((model) => model.visibility === 'list' && MODEL_ID.test(model.slug))
+      .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
+      .map((model) => ({ id: model.slug, description: model.description }));
+  } catch {
+    // no cache yet: every known model is listed as "other"
+  }
+  return { configured, listed };
+}
+
+function modelsFor(id) {
+  if (id === 'claude') {
+    return [{ id: '', label: 'Default', description: "Claude Code's default", group: '' }, ...CLAUDE_MODELS];
+  }
+  const { configured, listed } = codexModels();
+  const onPlan = [...listed];
+  if (configured && MODEL_ID.test(configured) && !onPlan.some((model) => model.id === configured)) {
+    onPlan.unshift({ id: configured, description: 'Set as your Codex default' });
+  }
+  const planIds = new Set(onPlan.map((model) => model.id));
+  return [
+    { id: '', label: 'Default', description: configured ? `Your Codex default, ${gptLabel(configured)}` : "Codex's default", group: '' },
+    ...onPlan.map((model) => ({ ...model, label: gptLabel(model.id), group: 'On your plan' })),
+    ...GPT_MODELS.filter((slug) => !planIds.has(slug)).map((slug) => ({ id: slug, label: gptLabel(slug), group: 'Other models' })),
+  ];
+}
+
+// Any well-formed model ID is accepted so people can try models that are not
+// listed yet; the CLI reports an error if the plan does not include it.
+function validModel(_id, model) {
+  return model === '' || MODEL_ID.test(model);
+}
 
 async function agentStatus(id) {
   const agent = AGENTS[id];
   const binary = which(agent.command);
-  const base = { id, name: agent.name, plan: agent.plan, installed: Boolean(binary), ready: false };
-  if (!binary) {
-    return {
-      ...base,
-      hint: id === 'claude'
-        ? 'Install Claude Code from claude.com/claude-code, then run: claude auth login'
-        : 'Install Codex with: npm install -g @openai/codex, then run: codex login',
-    };
-  }
+  const base = {
+    id,
+    name: agent.name,
+    company: agent.company,
+    plan: agent.plan,
+    installed: Boolean(binary),
+    ready: false,
+    models: modelsFor(id),
+  };
+  if (!binary) return { ...base, action: 'install', hint: `Install ${agent.name}, then sign in.` };
   return id === 'claude' ? claudeStatus(base) : codexStatus(base);
 }
 
@@ -38,29 +123,27 @@ async function claudeStatus(base) {
     // older releases print text; treated as unknown below
   }
   if (!auth?.loggedIn) {
-    return { ...base, hint: 'Sign in with your Claude plan. In Terminal, run: claude auth login' };
+    return { ...base, action: 'signin', hint: 'Sign in with your Claude plan.' };
   }
   if (/api/i.test(auth.authMethod || '')) {
-    return { ...base, hint: 'Claude Code is using an API key. Run claude auth login and choose your Claude subscription.' };
+    return { ...base, action: 'signin', hint: 'Using an API key. Sign in with your Claude plan instead.' };
   }
-  return { ...base, ready: true, account: auth.authMethod };
+  return { ...base, ready: true, action: 'signin', account: auth.authMethod };
 }
 
 async function codexStatus(base) {
   const result = await capture('codex', ['login', 'status']);
   const text = `${result.stdout}\n${result.stderr}`;
-  if (/chatgpt/i.test(text)) {
-    return { ...base, ready: true, account: 'ChatGPT', hint: 'If a run reports 401, run codex logout and codex login.' };
-  }
+  if (/chatgpt/i.test(text)) return { ...base, ready: true, action: 'signin', account: 'ChatGPT' };
   if (/api key/i.test(text)) {
-    return { ...base, hint: 'Codex is using an API key. Run codex logout, then codex login and choose Sign in with ChatGPT.' };
+    return { ...base, action: 'signin', hint: 'Using an API key. Sign in with ChatGPT instead.' };
   }
-  return { ...base, hint: 'Sign in with your ChatGPT plan. In Terminal, run: codex login' };
+  return { ...base, action: 'signin', hint: 'Sign in with your ChatGPT plan.' };
 }
 
 function mcpServer() {
   const rea = reaCommand();
-  return { command: rea.command, args: [...rea.args, 'mcp'] };
+  return { command: rea.command, args: [...rea.args, 'mcp'], env: analysisEnv() };
 }
 
 function claudeArgs(targetPaths) {
@@ -95,16 +178,22 @@ function codexArgs(workspace) {
     '-c', 'forced_login_method="chatgpt"',
     '-c', `mcp_servers.rea.command=${JSON.stringify(server.command)}`,
     '-c', `mcp_servers.rea.args=${JSON.stringify(server.args)}`,
+    '-c', `mcp_servers.rea.env={${Object.entries(server.env).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(',')}}`,
     '-c', 'mcp_servers.rea.startup_timeout_sec=120',
     '-c', 'mcp_servers.rea.tool_timeout_sec=600',
+    // `codex exec` never prompts, so unapproved MCP calls are refused.
+    // Pre-approve REA's tools only; the shell stays sandboxed.
+    '-c', 'mcp_servers.rea.default_tools_approval_mode="approve"',
     '-',
   ];
 }
 
 // Starts an agent run and reports normalized events:
 //   { kind: 'status' | 'text' | 'tool' | 'tool_result' | 'error' | 'done', ... }
-function runAgent({ id, prompt, workspace, targetPaths, onEvent }) {
+function runAgent({ id, model, prompt, workspace, targetPaths, onEvent }) {
   const args = id === 'claude' ? claudeArgs(targetPaths) : codexArgs(workspace);
+  // Right after `-p` / `exec`. An empty model leaves the CLI on its default.
+  if (model) args.splice(1, 0, id === 'claude' ? '--model' : '-m', model);
   const env = childEnv(id === 'claude' ? { MCP_TOOL_TIMEOUT: '600000', MCP_TIMEOUT: '120000' } : {});
   const child = spawn(AGENTS[id].command, args, {
     cwd: workspace,
@@ -228,12 +317,24 @@ function toolName(name) {
   return String(name || '').replace(/^mcp__rea__/, '');
 }
 
+// A short, readable label for a tool call: a file name, symbol or query when
+// the call has one, otherwise nothing (the tool name says enough).
 function describeInput(input) {
+  if (typeof input === 'string') {
+    try {
+      input = JSON.parse(input);
+    } catch {
+      return input.slice(0, 120);
+    }
+  }
   if (!input || typeof input !== 'object') return '';
-  const preferred = input.input_path || input.path || input.file_path || input.procedure || input.address || input.query;
-  if (preferred) return String(preferred);
-  const text = JSON.stringify(input);
-  return text.length > 140 ? `${text.slice(0, 140)}…` : text;
+  for (const key of ['input_path', 'path', 'file_path', 'target', 'binary_path']) {
+    if (typeof input[key] === 'string') return path.basename(input[key]);
+  }
+  for (const key of ['procedure', 'name', 'symbol', 'address', 'query', 'feature', 'pattern']) {
+    if (typeof input[key] === 'string' || typeof input[key] === 'number') return String(input[key]).slice(0, 120);
+  }
+  return '';
 }
 
 function flatten(content) {
@@ -246,4 +347,4 @@ function lastLine(text) {
   return text.trim().split('\n').filter(Boolean).pop() || '';
 }
 
-module.exports = { AGENTS, agentStatus, runAgent };
+module.exports = { AGENTS, agentStatus, runAgent, validModel };
